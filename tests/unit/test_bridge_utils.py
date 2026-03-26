@@ -234,5 +234,103 @@ class TestUnixHTTPConnection(unittest.TestCase):
         self.assertEqual(conn.timeout, 10)
 
 
+class TestDiscoveryFallbacks(unittest.TestCase):
+    """Test UDS/TCP discovery fallback behavior."""
+
+    def test_discover_instances_uses_tcp_when_no_socket_dir(self):
+        import bridge_mcp_ghidra as bridge
+
+        with patch.object(bridge, "get_socket_dir", return_value=Path("/missing-sockets")), \
+             patch.dict(os.environ, {"GHIDRA_MCP_URL": "http://127.0.0.1:8089"}, clear=False), \
+             patch.object(bridge, "_probe_tcp_instance", return_value={
+                 "transport": "tcp",
+                 "url": "http://127.0.0.1:8089",
+                 "project": "TcpProject",
+                 "server_version": "4.3.0",
+             }):
+            instances = bridge.discover_instances()
+
+        self.assertEqual(len(instances), 1)
+        self.assertEqual(instances[0]["transport"], "tcp")
+        self.assertEqual(instances[0]["project"], "TcpProject")
+        self.assertEqual(instances[0]["url"], "http://127.0.0.1:8089")
+
+    def test_probe_tcp_instance_falls_back_to_check_connection(self):
+        import bridge_mcp_ghidra as bridge
+
+        responses = [
+            ("not found", 404),
+            (json.dumps({"data": {"project_name": "TcpProject", "connected": True}}), 200),
+        ]
+
+        with patch.object(bridge, "tcp_request", side_effect=responses):
+            info = bridge._probe_tcp_instance("http://127.0.0.1:8089")
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info["transport"], "tcp")
+        self.assertEqual(info["url"], "http://127.0.0.1:8089")
+        self.assertEqual(info["project"], "TcpProject")
+        self.assertTrue(info["connected"])
+
+    def test_probe_tcp_instance_uses_synthetic_instance_for_plain_text_check_connection(self):
+        import bridge_mcp_ghidra as bridge
+
+        responses = [
+            ("not found", 404),
+            ("Connected: GhidraMCP plugin running, but no program loaded", 200),
+        ]
+
+        with patch.object(bridge, "tcp_request", side_effect=responses):
+            info = bridge._probe_tcp_instance("http://127.0.0.1:8089")
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info["transport"], "tcp")
+        self.assertEqual(info["url"], "http://127.0.0.1:8089")
+        self.assertEqual(info["project"], "tcp")
+        self.assertTrue(info["connected"])
+        self.assertEqual(info["status"], "Connected: GhidraMCP plugin running, but no program loaded")
+
+    def test_discover_instances_keeps_plain_text_tcp_instance(self):
+        import bridge_mcp_ghidra as bridge
+
+        with patch.object(bridge, "get_socket_dir", return_value=Path("/missing-sockets")), \
+             patch.dict(os.environ, {"GHIDRA_MCP_URL": "http://127.0.0.1:8089"}, clear=False), \
+             patch.object(bridge, "_probe_tcp_instance", return_value={
+                 "transport": "tcp",
+                 "url": "http://127.0.0.1:8089",
+                 "project": "tcp",
+                 "connected": True,
+                 "status": "Connected: GhidraMCP plugin running, but no program loaded",
+             }):
+            instances = bridge.discover_instances()
+
+        self.assertEqual(len(instances), 1)
+        self.assertEqual(instances[0]["transport"], "tcp")
+        self.assertEqual(instances[0]["url"], "http://127.0.0.1:8089")
+        self.assertEqual(instances[0]["project"], "tcp")
+        self.assertTrue(instances[0]["connected"])
+
+    def test_list_instances_marks_tcp_connection(self):
+        import bridge_mcp_ghidra as bridge
+
+        previous_tcp = bridge._active_tcp
+        previous_transport = bridge._transport_mode
+        bridge._active_tcp = "http://127.0.0.1:8089"
+        bridge._transport_mode = "tcp"
+        try:
+            with patch.object(bridge, "discover_instances", return_value=[{
+                "transport": "tcp",
+                "url": "http://127.0.0.1:8089",
+                "project": "TcpProject",
+            }]):
+                payload = json.loads(bridge.list_instances(""))
+        finally:
+            bridge._active_tcp = previous_tcp
+            bridge._transport_mode = previous_transport
+
+        self.assertEqual(len(payload["instances"]), 1)
+        self.assertTrue(payload["instances"][0]["connected"])
+
+
 if __name__ == "__main__":
     unittest.main()

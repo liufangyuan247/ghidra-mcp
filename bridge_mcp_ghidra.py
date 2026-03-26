@@ -157,6 +157,11 @@ def is_pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # Running but owned by another user
+    except OSError as e:
+        # Windows may raise WinError 87 for obviously invalid PIDs.
+        if getattr(e, "winerror", None) == 87:
+            return False
+        raise
 
 
 def validate_server_url(url: str) -> bool:
@@ -282,45 +287,118 @@ def do_request(
 # ==========================================================================
 
 
+def _unwrap_response_payload(text: str) -> dict:
+    """Parse a JSON response and unwrap Response.ok() payloads when present."""
+    data = json.loads(text)
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        return data["data"]
+    if isinstance(data, dict):
+        return data
+    raise ValueError("Response body is not a JSON object")
+
+
+def _build_tcp_synthetic_instance(base_url: str, text: str) -> dict:
+    """Build a synthetic TCP instance record from a reachable plain-text probe."""
+    message = text.strip()
+    info: dict = {
+        "url": base_url,
+        "transport": "tcp",
+        "project": "tcp",
+        "connected": True,
+    }
+    if message:
+        info["status"] = message
+    return info
+
+
+def _probe_uds_instance(socket_path: str, pid: int) -> dict:
+    """Collect best-effort instance metadata from a UDS server."""
+    info: dict = {"socket": socket_path, "pid": pid, "transport": "uds"}
+
+    try:
+        text, status = uds_request(socket_path, "GET", "/mcp/instance_info", timeout=5)
+        if status == 200:
+            info.update(_unwrap_response_payload(text))
+            return info
+        logger.debug(f"UDS instance_info unavailable on {socket_path}: HTTP {status}")
+    except Exception as e:
+        logger.debug(f"UDS instance_info probe failed for {socket_path}: {e}")
+
+    try:
+        text, status = uds_request(socket_path, "GET", "/check_connection", timeout=5)
+        if status == 200:
+            payload = _unwrap_response_payload(text)
+            if isinstance(payload, dict):
+                info.update(payload)
+    except Exception as e:
+        logger.debug(f"UDS check_connection probe failed for {socket_path}: {e}")
+
+    return info
+
+
+def _probe_tcp_instance(base_url: str) -> dict | None:
+    """Collect best-effort instance metadata from a TCP server."""
+    info: dict = {"url": base_url, "transport": "tcp"}
+
+    try:
+        text, status = tcp_request(base_url, "GET", "/mcp/instance_info", timeout=5)
+        if status == 200:
+            info.update(_unwrap_response_payload(text))
+            return info
+        logger.debug(f"TCP instance_info unavailable on {base_url}: HTTP {status}")
+    except Exception as e:
+        logger.debug(f"TCP instance_info probe failed for {base_url}: {e}")
+
+    try:
+        text, status = tcp_request(base_url, "GET", "/check_connection", timeout=5)
+        if status != 200:
+            logger.debug(f"TCP check_connection failed for {base_url}: HTTP {status}")
+            return None
+        try:
+            payload = _unwrap_response_payload(text)
+        except (json.JSONDecodeError, ValueError):
+            logger.debug(f"TCP check_connection returned plain text for {base_url}; using synthetic instance")
+            return _build_tcp_synthetic_instance(base_url, text)
+        if isinstance(payload, dict):
+            info.update(payload)
+        info.setdefault("project", payload.get("project_name") or payload.get("project") or "tcp")
+        return info
+    except Exception as e:
+        logger.debug(f"TCP check_connection probe failed for {base_url}: {e}")
+        return None
+
+
 def discover_instances() -> list[dict]:
-    """Scan socket directory and query each live instance for info."""
-    socket_dir = get_socket_dir()
-    if not socket_dir.exists():
-        return []
-
+    """Discover reachable Ghidra instances over UDS and TCP."""
     instances = []
-    for sock_file in sorted(socket_dir.glob("*.sock")):
-        name = sock_file.stem  # ghidra-<pid>
-        dash = name.rfind("-")
-        if dash < 0:
-            continue
-        try:
-            pid = int(name[dash + 1:])
-        except ValueError:
-            continue
 
-        if not is_pid_alive(pid):
-            logger.debug(f"Cleaning up stale socket: {sock_file}")
+    socket_dir = get_socket_dir()
+    if socket_dir.exists():
+        for sock_file in sorted(socket_dir.glob("*.sock")):
+            name = sock_file.stem  # ghidra-<pid>
+            dash = name.rfind("-")
+            if dash < 0:
+                continue
             try:
-                sock_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-            continue
+                pid = int(name[dash + 1:])
+            except ValueError:
+                continue
 
-        info: dict = {"socket": str(sock_file), "pid": pid}
-        try:
-            text, status = uds_request(str(sock_file), "GET", "/mcp/instance_info", timeout=5)
-            if status == 200:
-                data = json.loads(text)
-                # instance_info response is wrapped in Response.ok() → {"data": {...}}
-                if "data" in data:
-                    info.update(data["data"])
-                else:
-                    info.update(data)
-        except Exception as e:
-            logger.debug(f"Could not query {sock_file}: {e}")
+            if not is_pid_alive(pid):
+                logger.debug(f"Cleaning up stale socket: {sock_file}")
+                try:
+                    sock_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
 
-        instances.append(info)
+            instances.append(_probe_uds_instance(str(sock_file), pid))
+
+    tcp_url = os.getenv("GHIDRA_MCP_URL", DEFAULT_TCP_URL)
+    if tcp_url:
+        tcp_info = _probe_tcp_instance(tcp_url)
+        if tcp_info:
+            instances.append(tcp_info)
 
     return instances
 
@@ -351,11 +429,29 @@ def get_timeout(endpoint: str, payload: dict | None = None) -> int:
     return base
 
 
+def _activate_instance(instance: dict) -> None:
+    """Set active transport globals from a discovered instance record."""
+    global _active_socket, _active_tcp, _transport_mode
+
+    transport = instance.get("transport")
+    if transport == "uds" and instance.get("socket"):
+        _active_socket = instance["socket"]
+        _active_tcp = None
+        _transport_mode = "uds"
+        return
+    if transport == "tcp" and instance.get("url"):
+        _active_tcp = instance["url"]
+        _active_socket = None
+        _transport_mode = "tcp"
+        return
+    raise ValueError(f"Unsupported instance record: {instance}")
+
+
 def _try_reconnect() -> bool:
     """Try to reconnect to the previously connected project after Ghidra restarts.
 
-    Scans for UDS instances matching _connected_project. If found, updates the
-    active socket and re-fetches the schema. Returns True if reconnected.
+    Scans discovered instances matching _connected_project. If found, updates the
+    active transport and re-fetches the schema. Returns True if reconnected.
     """
     global _active_socket, _active_tcp, _transport_mode
 
@@ -365,12 +461,13 @@ def _try_reconnect() -> bool:
     instances = discover_instances()
     for inst in instances:
         if inst.get("project", "") == _connected_project:
-            _active_socket = inst["socket"]
-            _active_tcp = None
-            _transport_mode = "uds"
             try:
+                _activate_instance(inst)
                 _fetch_and_register_schema()
-                logger.info(f"Reconnected to project '{_connected_project}' via {inst['socket']}")
+                logger.info(
+                    f"Reconnected to project '{_connected_project}' via "
+                    f"{inst.get('socket') or inst.get('url')}"
+                )
                 return True
             except Exception as e:
                 logger.warning(f"Reconnect schema fetch failed: {e}")
@@ -379,12 +476,13 @@ def _try_reconnect() -> bool:
     # Exact match failed, try substring
     for inst in instances:
         if _connected_project.lower() in inst.get("project", "").lower():
-            _active_socket = inst["socket"]
-            _active_tcp = None
-            _transport_mode = "uds"
             try:
+                _activate_instance(inst)
+                logger.info(
+                    f"Reconnected to project '{inst.get('project')}' via "
+                    f"{inst.get('socket') or inst.get('url')}"
+                )
                 _fetch_and_register_schema()
-                logger.info(f"Reconnected to project '{inst.get('project')}' via {inst['socket']}")
                 return True
             except Exception as e:
                 logger.warning(f"Reconnect schema fetch failed: {e}")
@@ -517,46 +615,63 @@ _TYPE_MAP = {
 }
 
 
-def _parse_schema(raw: dict) -> list[dict]:
-    """Convert upstream AnnotationScanner schema to internal tool defs.
+def _parse_schema(raw: dict) -> tuple[list[dict], dict[str, str], dict[str, str]]:
+    """Convert upstream AnnotationScanner schema to internal tool defs + grouping metadata.
 
     Upstream format: {"tools": [{"path", "method", "description", "category", "params": [...]}]}
-    Internal format: [{"name", "endpoint", "http_method", "description", "category", "input_schema"}]
+    Internal format: [{"name", "endpoint", "http_method", "description", "input_schema"}]
     """
     tool_defs = []
+    tool_groups: dict[str, str] = {}
+    group_descriptions: dict[str, str] = {}
+
     for tool in raw.get("tools", []):
         path = tool["path"]
         name = path.lstrip("/")
         params = tool.get("params", [])
 
         properties = {}
-        required = []
-        for p in params:
-            pdef: dict = {"type": p.get("type", "string")}
-            if p.get("description"):
-                pdef["description"] = p["description"]
-            if "default" in p and p["default"] is not None:
-                pdef["default"] = p["default"]
-            properties[p["name"]] = pdef
-            if p.get("required", False):
-                required.append(p["name"])
+        required_list = [] # 用一个列表收集必填项
 
-        tool_defs.append({
+        if isinstance(params, list):
+            for p in params:
+                p_name = p.get("name")
+                if not p_name: continue
+                pdef: dict = {"type": p.get("type", "string")}
+                if p.get("description"):
+                    pdef["description"] = p["description"]
+                if "default" in p and p["default"] is not None:
+                    pdef["default"] = p["default"]
+                properties[p["name"]] = pdef
+                if p.get("required") is True:
+                    required_list.append(p_name)
+
+        # --- 核心修复逻辑 ---
+        input_schema = {
+            "type": "object",
+            "properties": properties
+        }
+        
+        # 只有当必填项列表【不为空】时，才添加 required 键
+        # 如果 required_list 是空的，OpenAI 要求根本不要出现这个键
+        if required_list:
+            input_schema["required"] = required_list
+        # -------------------
+
+        tool_def = {
             "name": name,
             "endpoint": path,
             "http_method": tool.get("method", "GET"),
             "description": tool.get("description", ""),
-            "category": tool.get("category", "unknown"),
-            "category_description": tool.get("category_description", ""),
-            "input_schema": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        })
+            "input_schema": input_schema,
+        }
+        group_name = tool.get("category", "unknown")
+        tool_groups[name] = group_name
+        if group_name not in group_descriptions and tool.get("category_description"):
+            group_descriptions[group_name] = tool["category_description"]
 
-    return tool_defs
-
+        tool_defs.append(tool_def)
+    return tool_defs, tool_groups, group_descriptions
 
 # ==========================================================================
 # Dynamic tool registration from /mcp/schema
@@ -569,6 +684,8 @@ STATIC_TOOL_NAMES = {"list_instances", "connect_instance", "list_tool_groups",
 _dynamic_tool_names: list[str] = []
 _full_schema: list[dict] = []  # Complete parsed schema
 _loaded_groups: set[str] = set()
+_tool_groups: dict[str, str] = {}
+_tool_group_descriptions: dict[str, str] = {}
 
 # Core groups always loaded on connect (essential for basic RE workflow)
 CORE_GROUPS = {"listing", "function", "program"}
@@ -582,13 +699,21 @@ def _build_tool_function(endpoint: str, http_method: str, params_schema: dict):
     """Build a callable that dispatches to the Ghidra HTTP endpoint."""
     properties = params_schema.get("properties", {})
     required = set(params_schema.get("required", []))
+    synthetic_noarg_param = "unused"
 
     def handler(**kwargs):
+# <<<<<<< HEAD
         # Sanitize address parameters before dispatch
         for pname, pdef in properties.items():
             if pdef.get("paramType") == "address" and pname in kwargs and kwargs[pname] is not None:
                 kwargs[pname] = sanitize_address(str(kwargs[pname]))
         filtered = {k: v for k, v in kwargs.items() if v is not None}
+# =======
+        # filtered = {
+        #     k: v for k, v in kwargs.items()
+        #     if v is not None and k != synthetic_noarg_param
+        # }
+# >>>>>>> f85b782 (适配roo code)
         if http_method == "GET":
             str_params = {k: str(v) for k, v in filtered.items()}
             return dispatch_get(endpoint, params=str_params if str_params else None)
@@ -613,6 +738,15 @@ def _build_tool_function(endpoint: str, http_method: str, params_schema: dict):
             required_params.append(param)
         else:
             optional_params.append(param)
+
+    if not required_params:
+        required_params.append(
+            inspect.Parameter(
+                synthetic_noarg_param,
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            )
+        )
 
     sig_params = required_params + optional_params
     handler.__signature__ = inspect.Signature(sig_params, return_annotation=str)
@@ -641,16 +775,23 @@ def _register_tool_def(tool_def: dict) -> bool:
     return True
 
 
-def register_tools_from_schema(schema: list[dict], groups: set[str] | None = None) -> int:
+def register_tools_from_schema(
+    schema: list[dict],
+    groups: set[str] | None = None,
+    tool_groups: dict[str, str] | None = None,
+    group_descriptions: dict[str, str] | None = None,
+) -> int:
     """Register MCP tools from parsed schema.
 
     Args:
         schema: List of parsed tool definitions.
         groups: If provided, only register tools in these groups. None = register all.
+        tool_groups: Optional mapping of tool name -> group.
+        group_descriptions: Optional mapping of group -> description.
 
     Returns: count of registered tools.
     """
-    global _dynamic_tool_names, _full_schema, _loaded_groups
+    global _dynamic_tool_names, _full_schema, _loaded_groups, _tool_groups, _tool_group_descriptions
 
     # Remove previously registered dynamic tools
     for name in _dynamic_tool_names:
@@ -663,10 +804,12 @@ def register_tools_from_schema(schema: list[dict], groups: set[str] | None = Non
 
     # Store full schema for lazy loading
     _full_schema = schema
+    _tool_groups = tool_groups or {td["name"]: "unknown" for td in schema}
+    _tool_group_descriptions = group_descriptions or {}
 
     count = 0
     for tool_def in schema:
-        category = tool_def.get("category", "unknown")
+        category = _tool_groups.get(tool_def["name"], "unknown")
         if groups is not None and category not in groups:
             continue
         _register_tool_def(tool_def)
@@ -680,9 +823,9 @@ def _load_group(group_name: str) -> int:
     """Load tools for a specific group from cached schema. Returns count."""
     count = 0
     for tool_def in _full_schema:
-        if tool_def.get("category") != group_name:
-            continue
         name = tool_def["name"]
+        if _tool_groups.get(name, "unknown") != group_name:
+            continue
         if name in _dynamic_tool_names:
             continue  # Already loaded
         _register_tool_def(tool_def)
@@ -699,10 +842,9 @@ def _unload_group(group_name: str) -> int:
 
     to_remove = []
     for tool_def in _full_schema:
-        if tool_def.get("category") == group_name:
-            name = tool_def["name"]
-            if name in _dynamic_tool_names:
-                to_remove.append(name)
+        name = tool_def["name"]
+        if _tool_groups.get(name, "unknown") == group_name and name in _dynamic_tool_names:
+            to_remove.append(name)
 
     for name in to_remove:
         try:
@@ -721,10 +863,11 @@ def _get_group_info() -> list[dict]:
     groups: dict[str, list[str]] = {}
     descriptions: dict[str, str] = {}
     for tool_def in _full_schema:
-        cat = tool_def.get("category", "unknown")
-        groups.setdefault(cat, []).append(tool_def["name"])
-        if cat not in descriptions and tool_def.get("category_description"):
-            descriptions[cat] = tool_def["category_description"]
+        tool_name = tool_def["name"]
+        cat = _tool_groups.get(tool_name, "unknown")
+        groups.setdefault(cat, []).append(tool_name)
+        if cat not in descriptions and cat in _tool_group_descriptions:
+            descriptions[cat] = _tool_group_descriptions[cat]
 
     result = []
     for name, tools in sorted(groups.items()):
@@ -755,9 +898,14 @@ def _fetch_and_register_schema(load_all: bool = False) -> int:
     if status != 200:
         raise RuntimeError(f"Failed to fetch schema: HTTP {status}")
     raw = json.loads(text)
-    schema = _parse_schema(raw)
+    schema, tool_groups, group_descriptions = _parse_schema(raw)
     groups = None if load_all else _default_groups
-    return register_tools_from_schema(schema, groups=groups)
+    return register_tools_from_schema(
+        schema,
+        groups=groups,
+        tool_groups=tool_groups,
+        group_descriptions=group_descriptions,
+    )
 
 
 async def _notify_tools_changed(ctx: Context | None) -> None:
@@ -772,18 +920,23 @@ async def _notify_tools_changed(ctx: Context | None) -> None:
 
 
 @mcp.tool()
-def list_instances() -> str:
+def list_instances(unused: str, ctx: Context = None) -> str:
     """
-    List all running Ghidra instances discovered via Unix domain sockets.
+    List all reachable Ghidra instances discovered via UDS and TCP.
 
-    Returns JSON with each instance's project name, PID, open programs, and socket path.
-    Also shows which instance is currently connected.
+    Returns JSON with each instance's project name, transport details, and any
+    metadata exposed by the server. Also shows which instance is currently connected.
     """
     instances = discover_instances()
     if not instances:
-        return json.dumps({"instances": [], "note": "No running Ghidra instances found."})
+        return json.dumps({"instances": [], "note": "No reachable Ghidra instances found."})
     for inst in instances:
-        inst["connected"] = inst["socket"] == _active_socket
+        if inst.get("transport") == "uds":
+            inst["connected"] = inst.get("socket") == _active_socket
+        elif inst.get("transport") == "tcp":
+            inst["connected"] = inst.get("url") == _active_tcp
+        else:
+            inst["connected"] = False
     return json.dumps({"instances": instances}, indent=2)
 
 
@@ -802,71 +955,79 @@ async def connect_instance(project: str, ctx: Context | None = None) -> str:
 
     instances = discover_instances()
 
-    # Try UDS instances first
-    if instances:
-        match = None
+    match = None
+    for inst in instances:
+        if inst.get("project", "") == project:
+            match = inst
+            break
+    if not match:
         for inst in instances:
-            if inst.get("project", "") == project:
+            if project.lower() in inst.get("project", "").lower():
                 match = inst
                 break
-        if not match:
-            for inst in instances:
-                if project.lower() in inst.get("project", "").lower():
-                    match = inst
-                    break
-        if match:
-            _active_socket = match["socket"]
-            _active_tcp = None
-            _transport_mode = "uds"
+
+    if match:
+        try:
+            _activate_instance(match)
             _connected_project = match.get("project")
+            count = _fetch_and_register_schema()
+            total = len(_full_schema)
+            await _notify_tools_changed(ctx)
+            response = {
+                "connected": True,
+                "transport": match.get("transport"),
+                "project": _connected_project,
+                "tools_registered": count,
+                "tools_total": total,
+                "loaded_groups": sorted(_loaded_groups),
+                "note": f"Loaded {count}/{total} tools (core groups). Use load_tool_group() for more.",
+            }
+            if match.get("socket"):
+                response["socket"] = match["socket"]
+            if match.get("pid") is not None:
+                response["pid"] = match.get("pid")
+            if match.get("url"):
+                response["url"] = match["url"]
+            return json.dumps(response)
+        except Exception as e:
+            return json.dumps({
+                "error": f"Schema fetch failed: {e}",
+                "socket": match.get("socket"),
+                "url": match.get("url"),
+            })
 
-            try:
-                count = _fetch_and_register_schema()
-                total = len(_full_schema)
-                await _notify_tools_changed(ctx)
-                return json.dumps({
-                    "connected": True,
-                    "transport": "uds",
-                    "project": _connected_project,
-                    "socket": match["socket"],
-                    "pid": match.get("pid"),
-                    "tools_registered": count,
-                    "tools_total": total,
-                    "loaded_groups": sorted(_loaded_groups),
-                    "note": f"Loaded {count}/{total} tools (core groups). Use load_tool_group() for more.",
-                })
-            except Exception as e:
-                return json.dumps({"error": f"Schema fetch failed: {e}", "socket": _active_socket})
-
-    # Try TCP fallback
-    tcp_url = os.getenv("GHIDRA_MCP_URL", DEFAULT_TCP_URL)
+    # Try TCP fallback directly for explicit URL selection or default single-server usage
+    tcp_url = project if project.startswith(("http://", "https://")) else os.getenv("GHIDRA_MCP_URL", DEFAULT_TCP_URL)
     try:
-        _active_tcp = tcp_url
-        _active_socket = None
-        _transport_mode = "tcp"
+        _activate_instance({"transport": "tcp", "url": tcp_url})
         count = _fetch_and_register_schema()
         total = len(_full_schema)
+        tcp_info = _probe_tcp_instance(tcp_url) or {"project": project if project != tcp_url else None}
+        _connected_project = tcp_info.get("project") or project
         await _notify_tools_changed(ctx)
         return json.dumps({
             "connected": True,
             "transport": "tcp",
+            "project": _connected_project,
             "url": tcp_url,
             "tools_registered": count,
             "tools_total": total,
             "loaded_groups": sorted(_loaded_groups),
+            "note": f"Loaded {count}/{total} tools (core groups). Use load_tool_group() for more.",
         })
     except Exception as e:
         _transport_mode = "none"
         _active_tcp = None
-        available = [inst.get("project", "unknown") for inst in instances]
+        _active_socket = None
+        available = [inst.get("project", inst.get("url", "unknown")) for inst in instances]
         return json.dumps({
-            "error": f"No instance matching '{project}' (UDS: {len(instances)} found, TCP {tcp_url}: {e})",
+            "error": f"No instance matching '{project}' (discovered: {len(instances)}, TCP {tcp_url}: {e})",
             "available": available,
         })
 
 
 @mcp.tool()
-def list_tool_groups() -> str:
+def list_tool_groups(unused: str, ctx: Context = None) -> str:
     """
     List all available tool groups with their tool counts and loaded status.
 
@@ -894,7 +1055,7 @@ async def load_tool_group(group: str, ctx: Context | None = None) -> str:
 
     if group == "all":
         # Load all unloaded groups
-        all_groups = {td.get("category", "unknown") for td in _full_schema}
+        all_groups = { _tool_groups.get(td["name"], "unknown") for td in _full_schema }
         total = 0
         for g in all_groups:
             total += _load_group(g)
@@ -908,7 +1069,7 @@ async def load_tool_group(group: str, ctx: Context | None = None) -> str:
 
     count = _load_group(group)
     if count == 0:
-        available = sorted({td.get("category", "unknown") for td in _full_schema})
+        available = sorted({_tool_groups.get(td["name"], "unknown") for td in _full_schema})
         if group in _loaded_groups:
             return json.dumps({"message": f"Group '{group}' is already loaded.", "loaded_groups": sorted(_loaded_groups)})
         return json.dumps({"error": f"No tools found for group '{group}'", "available": available})
@@ -1028,36 +1189,28 @@ def _auto_connect():
     """Try to auto-connect to a single running instance on startup."""
     global _active_socket, _active_tcp, _transport_mode, _connected_project
 
-    # Try UDS first
     instances = discover_instances()
     if len(instances) == 1:
-        _active_socket = instances[0]["socket"]
-        _transport_mode = "uds"
-        _connected_project = instances[0].get("project")
-        logger.info(f"Auto-connecting via UDS to {_connected_project or 'unknown'}")
+        instance = instances[0]
         try:
+            _activate_instance(instance)
+            _connected_project = instance.get("project")
+            logger.info(
+                f"Auto-connecting via {instance.get('transport')} to "
+                f"{_connected_project or instance.get('url') or 'unknown'}"
+            )
             count = _fetch_and_register_schema()
-            logger.info(f"Auto-registered {count} tools from {_connected_project or 'unknown'}")
+            logger.info(f"Auto-registered {count} tools from {_connected_project or instance.get('url') or 'unknown'}")
             return
         except Exception as e:
-            logger.warning(f"UDS auto-connect schema fetch failed: {e}")
+            logger.warning(f"Auto-connect schema fetch failed: {e}")
             _active_socket = None
+            _active_tcp = None
             _transport_mode = "none"
     elif len(instances) > 1:
-        logger.info(f"Multiple UDS instances found ({len(instances)}). Use connect_instance() to choose.")
-
-    # Try TCP fallback
-    tcp_url = os.getenv("GHIDRA_MCP_URL", DEFAULT_TCP_URL)
-    try:
-        _active_tcp = tcp_url
-        _transport_mode = "tcp"
-        count = _fetch_and_register_schema()
-        logger.info(f"Auto-connected via TCP to {tcp_url}, registered {count} tools")
-    except Exception:
-        _active_tcp = None
-        _transport_mode = "none"
-        if not instances:
-            logger.info("No Ghidra instances found. Tools will be registered on connect_instance().")
+        logger.info(f"Multiple Ghidra instances found ({len(instances)}). Use connect_instance() to choose.")
+    else:
+        logger.info("No Ghidra instances found. Tools will be registered on connect_instance().")
 
 
 # ==========================================================================
