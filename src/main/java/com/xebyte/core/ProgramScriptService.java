@@ -942,31 +942,53 @@ public class ProgramScriptService {
     @McpTool(path = "/run_script_inline", method = "POST", description = "Execute inline Ghidra script code", category = "program")
     public Response runScriptInline(
             @Param(value = "code", source = ParamSource.BODY) String code,
-            @Param(value = "args", source = ParamSource.BODY, defaultValue = "") String args) {
+            @Param(value = "args", source = ParamSource.BODY, defaultValue = "") String args,
+            @Param(value = "language", source = ParamSource.BODY, defaultValue = "auto") String language) {
         if (code == null || code.trim().isEmpty()) {
             return Response.err("code parameter required");
         }
 
-        // Use unique class name per invocation so Ghidra recompiles each time.
-        // If user provides their own class, extract its name for the filename.
-        String className = "McpInline_" + Long.toHexString(System.nanoTime());
-        java.util.regex.Matcher m = java.util.regex.Pattern
-            .compile("public\\s+class\\s+(\\w+)").matcher(code);
-        if (m.find()) {
-            className = m.group(1);
+        String normalizedLanguage = language == null ? "auto" : language.trim().toLowerCase(Locale.ROOT);
+        boolean looksLikeJava;
+
+        if ("java".equals(normalizedLanguage)) {
+            looksLikeJava = true;
+        } else if ("python".equals(normalizedLanguage) || "jython".equals(normalizedLanguage) || "py".equals(normalizedLanguage)) {
+            looksLikeJava = false;
+        } else if ("auto".equals(normalizedLanguage)) {
+            // Auto-detect Java vs Python (Jython) inline scripts.
+            String trimmed = code.trim();
+            looksLikeJava = trimmed.contains("extends GhidraScript")
+                || java.util.regex.Pattern.compile("public\\s+class\\s+\\w+").matcher(trimmed).find()
+                || (trimmed.contains(";") && trimmed.contains("{") && trimmed.contains("}"));
+        } else {
+            return Response.err("Invalid language: " + language + ". Supported: auto, java, python");
+        }
+
+        String scriptBaseName = "McpInline_" + Long.toHexString(System.nanoTime());
+        String scriptExt = looksLikeJava ? ".java" : ".py";
+
+        // If user provides a Java class, align filename with the public class name.
+        if (looksLikeJava) {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("public\\s+class\\s+(\\w+)").matcher(code);
+            if (m.find()) {
+                scriptBaseName = m.group(1);
+            }
         }
 
         // Write to ~/ghidra_scripts/ so OSGi classloader can find the source bundle
         File scriptsDir = new File(System.getProperty("user.home"), "ghidra_scripts");
         scriptsDir.mkdirs();
-        File tempScript = new File(scriptsDir, className + ".java");
+        File tempScript = new File(scriptsDir, scriptBaseName + scriptExt);
 
         try {
-            // If code doesn't contain a class definition, wrap it
+            // Java inline snippets can be provided as a full class or as a run() body.
+            // Python (Jython) scripts are written as-is.
             String scriptCode = code;
-            if (!code.contains("extends GhidraScript")) {
+            if (looksLikeJava && !code.contains("extends GhidraScript")) {
                 scriptCode = "import ghidra.app.script.GhidraScript;\n"
-                    + "public class " + className + " extends GhidraScript {\n"
+                    + "public class " + scriptBaseName + " extends GhidraScript {\n"
                     + "    @Override\n"
                     + "    public void run() throws Exception {\n"
                     + code + "\n"

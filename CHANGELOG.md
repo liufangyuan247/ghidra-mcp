@@ -4,6 +4,18 @@ Complete version history for the Ghidra MCP Server project.
 
 ---
 
+## v4.3.1 - Unreleased
+
+### Namespace Management Endpoints
+
+- Added `/create_namespace` to create namespace hierarchies (supports paths like `A::B::C`).
+- Added `/delete_namespace` to delete empty namespaces with safety checks.
+- Added `/move_function_to_namespace` to move a function into a target namespace (optional auto-create).
+- Added `/move_function_to_global_namespace` to move a function back to global namespace.
+- Registered new endpoints in `EndpointRegistry` and updated `tests/endpoints.json` catalog.
+
+---
+
 ## v4.3.0 - 2026-03-09
 
 ### Annotation-Based Endpoints & Dynamic Bridge Registration

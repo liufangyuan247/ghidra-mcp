@@ -19,6 +19,7 @@ import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolTable;
 import ghidra.program.model.symbol.SymbolType;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.Namespace;
 import ghidra.util.Msg;
 import ghidra.util.task.ConsoleTaskMonitor;
 
@@ -771,6 +772,355 @@ public class FunctionService {
 
     public Response renameFunctionByAddress(String functionAddrStr, String newName) {
         return renameFunctionByAddress(functionAddrStr, newName, null);
+    }
+
+    /**
+     * Create a namespace hierarchy (supports paths like "A::B::C").
+     */
+    @McpTool(path = "/create_namespace", method = "POST", description = "Create namespace hierarchy", category = "function")
+    public Response createNamespace(
+            @Param(value = "namespace", source = ParamSource.BODY,
+                   description = "Namespace path to create, e.g. A::B::C") String namespacePath,
+            @Param(value = "program", source = ParamSource.BODY) String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+
+        if (namespacePath == null || namespacePath.trim().isEmpty()) {
+            return Response.err("Namespace path is required");
+        }
+
+        final AtomicReference<String> createdPath = new AtomicReference<>(null);
+        final AtomicReference<String> errorMsg = new AtomicReference<>(null);
+
+        try {
+            threadingStrategy.executeWrite(program, "Create namespace", () -> {
+                try {
+                    String normalized = normalizeNamespacePath(namespacePath);
+                    if (normalized.isEmpty()) {
+                        errorMsg.set("Namespace path is invalid");
+                        return null;
+                    }
+
+                    Namespace ns = resolveOrCreateNamespacePath(program, normalized, true);
+                    if (ns == null) {
+                        errorMsg.set("Failed to create namespace: " + normalized);
+                        return null;
+                    }
+
+                    createdPath.set(buildNamespacePath(ns));
+                } catch (Exception e) {
+                    errorMsg.set("Failed to create namespace: " + e.getMessage());
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            return Response.err("Failed to execute on Swing thread: " + e.getMessage());
+        }
+
+        if (errorMsg.get() != null) {
+            return Response.err(errorMsg.get());
+        }
+
+        return Response.ok(JsonHelper.mapOf(
+            "success", true,
+            "namespace", createdPath.get(),
+            "message", "Namespace created: " + createdPath.get()
+        ));
+    }
+
+    public Response createNamespace(String namespacePath) {
+        return createNamespace(namespacePath, null);
+    }
+
+    /**
+     * Delete a namespace if it is empty (no symbols/functions under it).
+     */
+    @McpTool(path = "/delete_namespace", method = "POST", description = "Delete an empty namespace", category = "function")
+    public Response deleteNamespace(
+            @Param(value = "namespace", source = ParamSource.BODY,
+                   description = "Namespace path, e.g. A::B::C") String namespacePath,
+            @Param(value = "program", source = ParamSource.BODY) String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+
+        if (namespacePath == null || namespacePath.trim().isEmpty()) {
+            return Response.err("Namespace path is required");
+        }
+
+        final AtomicReference<String> deletedPath = new AtomicReference<>(null);
+        final AtomicReference<String> errorMsg = new AtomicReference<>(null);
+
+        try {
+            threadingStrategy.executeWrite(program, "Delete namespace", () -> {
+                try {
+                    String normalized = normalizeNamespacePath(namespacePath);
+                    Namespace ns = resolveOrCreateNamespacePath(program, normalized, false);
+                    if (ns == null) {
+                        errorMsg.set("Namespace not found: " + normalized);
+                        return null;
+                    }
+                    if (ns.isGlobal()) {
+                        errorMsg.set("Cannot delete global namespace");
+                        return null;
+                    }
+
+                    SymbolTable symbolTable = program.getSymbolTable();
+                    for (Symbol symbol : symbolTable.getAllSymbols(true)) {
+                        Namespace parent = symbol.getParentNamespace();
+                        if (parent != null && parent.equals(ns)) {
+                            errorMsg.set("Namespace is not empty: " + normalized +
+                                ". Move or delete child symbols/functions first.");
+                            return null;
+                        }
+                    }
+
+                    Symbol nsSymbol = ns.getSymbol();
+                    if (nsSymbol == null || !nsSymbol.delete()) {
+                        errorMsg.set("Failed to delete namespace: " + normalized);
+                        return null;
+                    }
+
+                    deletedPath.set(normalized);
+                } catch (Exception e) {
+                    errorMsg.set("Failed to delete namespace: " + e.getMessage());
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            return Response.err("Failed to execute on Swing thread: " + e.getMessage());
+        }
+
+        if (errorMsg.get() != null) {
+            return Response.err(errorMsg.get());
+        }
+
+        return Response.ok(JsonHelper.mapOf(
+            "success", true,
+            "namespace", deletedPath.get(),
+            "message", "Namespace deleted: " + deletedPath.get()
+        ));
+    }
+
+    public Response deleteNamespace(String namespacePath) {
+        return deleteNamespace(namespacePath, null);
+    }
+
+    /**
+     * Move a function to a namespace path. Optionally creates missing namespace segments.
+     */
+    @McpTool(path = "/move_function_to_namespace", method = "POST", description = "Move function to namespace", category = "function")
+    public Response moveFunctionToNamespace(
+            @Param(value = "function_address", source = ParamSource.BODY,
+                   description = "Function address or name") String functionAddress,
+            @Param(value = "namespace", source = ParamSource.BODY,
+                   description = "Target namespace path, e.g. A::B") String namespacePath,
+            @Param(value = "create_if_missing", source = ParamSource.BODY, defaultValue = "true") boolean createIfMissing,
+            @Param(value = "program", source = ParamSource.BODY) String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+
+        if (functionAddress == null || functionAddress.trim().isEmpty()) {
+            return Response.err("Function address or name is required");
+        }
+        if (namespacePath == null || namespacePath.trim().isEmpty()) {
+            return Response.err("Namespace path is required");
+        }
+
+        final AtomicReference<Map<String, Object>> resultData = new AtomicReference<>(null);
+        final AtomicReference<String> errorMsg = new AtomicReference<>(null);
+
+        try {
+            threadingStrategy.executeWrite(program, "Move function to namespace", () -> {
+                try {
+                    Function func = ServiceUtils.resolveFunction(program, functionAddress);
+                    if (func == null) {
+                        errorMsg.set("No function found for " + functionAddress);
+                        return null;
+                    }
+
+                    String normalized = normalizeNamespacePath(namespacePath);
+                    Namespace targetNs = resolveOrCreateNamespacePath(program, normalized, createIfMissing);
+                    if (targetNs == null) {
+                        errorMsg.set("Namespace not found: " + normalized +
+                            (createIfMissing ? " (creation failed)" : ""));
+                        return null;
+                    }
+
+                    Namespace oldNs = func.getParentNamespace();
+                    String oldNsPath = oldNs != null ? buildNamespacePath(oldNs) : "<global>";
+
+                    if (oldNs != null && oldNs.equals(targetNs)) {
+                        resultData.set(JsonHelper.mapOf(
+                            "success", true,
+                            "function", func.getName(),
+                            "from_namespace", oldNsPath,
+                            "to_namespace", buildNamespacePath(targetNs),
+                            "message", "Function is already in target namespace"
+                        ));
+                        return null;
+                    }
+
+                    func.setParentNamespace(targetNs);
+
+                    resultData.set(JsonHelper.mapOf(
+                        "success", true,
+                        "function", func.getName(),
+                        "from_namespace", oldNsPath,
+                        "to_namespace", buildNamespacePath(targetNs),
+                        "message", "Moved function '" + func.getName() + "' to namespace '" +
+                            buildNamespacePath(targetNs) + "'"
+                    ));
+                } catch (Exception e) {
+                    errorMsg.set("Failed to move function to namespace: " + e.getMessage());
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            return Response.err("Failed to execute on Swing thread: " + e.getMessage());
+        }
+
+        if (errorMsg.get() != null) {
+            return Response.err(errorMsg.get());
+        }
+        if (resultData.get() != null) {
+            return Response.ok(resultData.get());
+        }
+        return Response.err("Unknown failure");
+    }
+
+    public Response moveFunctionToNamespace(String functionAddress, String namespacePath, boolean createIfMissing) {
+        return moveFunctionToNamespace(functionAddress, namespacePath, createIfMissing, null);
+    }
+
+    /**
+     * Move a function out of namespace to global namespace.
+     */
+    @McpTool(path = "/move_function_to_global_namespace", method = "POST", description = "Move function to global namespace", category = "function")
+    public Response moveFunctionToGlobalNamespace(
+            @Param(value = "function_address", source = ParamSource.BODY,
+                   description = "Function address or name") String functionAddress,
+            @Param(value = "program", source = ParamSource.BODY) String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+
+        if (functionAddress == null || functionAddress.trim().isEmpty()) {
+            return Response.err("Function address or name is required");
+        }
+
+        final AtomicReference<Map<String, Object>> resultData = new AtomicReference<>(null);
+        final AtomicReference<String> errorMsg = new AtomicReference<>(null);
+
+        try {
+            threadingStrategy.executeWrite(program, "Move function to global namespace", () -> {
+                try {
+                    Function func = ServiceUtils.resolveFunction(program, functionAddress);
+                    if (func == null) {
+                        errorMsg.set("No function found for " + functionAddress);
+                        return null;
+                    }
+
+                    Namespace oldNs = func.getParentNamespace();
+                    Namespace globalNs = program.getGlobalNamespace();
+                    String oldNsPath = oldNs != null ? buildNamespacePath(oldNs) : "<global>";
+
+                    if (oldNs == null || oldNs.isGlobal()) {
+                        resultData.set(JsonHelper.mapOf(
+                            "success", true,
+                            "function", func.getName(),
+                            "from_namespace", oldNsPath,
+                            "to_namespace", "<global>",
+                            "message", "Function is already in global namespace"
+                        ));
+                        return null;
+                    }
+
+                    func.setParentNamespace(globalNs);
+
+                    resultData.set(JsonHelper.mapOf(
+                        "success", true,
+                        "function", func.getName(),
+                        "from_namespace", oldNsPath,
+                        "to_namespace", "<global>",
+                        "message", "Moved function '" + func.getName() + "' to global namespace"
+                    ));
+                } catch (Exception e) {
+                    errorMsg.set("Failed to move function to global namespace: " + e.getMessage());
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            return Response.err("Failed to execute on Swing thread: " + e.getMessage());
+        }
+
+        if (errorMsg.get() != null) {
+            return Response.err(errorMsg.get());
+        }
+        if (resultData.get() != null) {
+            return Response.ok(resultData.get());
+        }
+        return Response.err("Unknown failure");
+    }
+
+    public Response moveFunctionToGlobalNamespace(String functionAddress) {
+        return moveFunctionToGlobalNamespace(functionAddress, null);
+    }
+
+    private String normalizeNamespacePath(String namespacePath) {
+        String normalized = namespacePath == null ? "" : namespacePath.trim();
+        normalized = normalized.replace("/", "::");
+        while (normalized.contains(":::") ) {
+            normalized = normalized.replace(":::", "::");
+        }
+        normalized = normalized.replaceAll("^:+", "");
+        normalized = normalized.replaceAll(":+$", "");
+        return normalized;
+    }
+
+    private Namespace resolveOrCreateNamespacePath(Program program, String namespacePath, boolean createIfMissing)
+            throws Exception {
+        Namespace current = program.getGlobalNamespace();
+        if (namespacePath == null || namespacePath.isEmpty()) {
+            return current;
+        }
+
+        SymbolTable symbolTable = program.getSymbolTable();
+        String[] parts = namespacePath.split("::");
+        for (String rawPart : parts) {
+            String part = rawPart.trim();
+            if (part.isEmpty()) {
+                continue;
+            }
+
+            Namespace next = symbolTable.getNamespace(part, current);
+            if (next == null) {
+                if (!createIfMissing) {
+                    return null;
+                }
+                next = symbolTable.createNameSpace(current, part, SourceType.USER_DEFINED);
+            }
+            current = next;
+        }
+
+        return current;
+    }
+
+    private String buildNamespacePath(Namespace namespace) {
+        if (namespace == null || namespace.isGlobal()) {
+            return "<global>";
+        }
+
+        List<String> parts = new ArrayList<>();
+        Namespace cur = namespace;
+        while (cur != null && !cur.isGlobal()) {
+            parts.add(cur.getName());
+            cur = cur.getParentNamespace();
+        }
+        Collections.reverse(parts);
+        return String.join("::", parts);
     }
 
     // ========================================================================

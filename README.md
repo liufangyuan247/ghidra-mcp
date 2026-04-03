@@ -374,6 +374,13 @@ curl http://127.0.0.1:8089/get_version
 - `rename_label` - Rename existing label
 - `rename_or_label` - Rename or create label
 
+### Namespace Management
+- `list_namespaces` - List namespace hierarchy
+- `create_namespace` - Create namespace hierarchy (supports paths like `A::B::C`)
+- `delete_namespace` - Delete an empty namespace
+- `move_function_to_namespace` - Move function into a namespace (optional auto-create)
+- `move_function_to_global_namespace` - Move function back to global namespace
+
 ### Renaming & Documentation
 - `rename_function` - Rename function by name
 - `rename_function_by_address` - Rename function by address
