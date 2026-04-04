@@ -152,6 +152,65 @@ public class ListingService {
         return Response.text(ServiceUtils.paginateList(sorted, offset, limit));
     }
 
+    @McpTool(path = "/list_functions_in_namespace", description = "List all functions within a namespace (supports A::B paths)", category = "listing")
+    public Response listFunctionsInNamespace(
+            @Param(value = "namespace", description = "Namespace path, e.g. MyClass or A::B") String namespacePath,
+            @Param(value = "offset", defaultValue = "0") int offset,
+            @Param(value = "limit", defaultValue = "1000") int limit,
+            @Param(value = "program", description = "Target program name") String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+
+        if (namespacePath == null || namespacePath.trim().isEmpty()) {
+            return Response.err("namespace parameter is required");
+        }
+
+        // Resolve the target namespace by walking the path (supports A::B)
+        String[] parts = namespacePath.trim().split("::");
+        Namespace current = program.getGlobalNamespace();
+        for (String part : parts) {
+            if (part.isEmpty()) continue;
+            ghidra.util.task.TaskMonitor mon = ghidra.util.task.TaskMonitor.DUMMY;
+            List<Namespace> children = new ArrayList<>();
+            for (Symbol sym : program.getSymbolTable().getChildren(current.getSymbol())) {
+                if ((sym.getSymbolType() == ghidra.program.model.symbol.SymbolType.NAMESPACE
+                        || sym.getSymbolType() == ghidra.program.model.symbol.SymbolType.CLASS)
+                        && sym.getName().equals(part)) {
+                    children.add((Namespace) sym.getObject());
+                }
+            }
+            if (children.isEmpty()) {
+                return Response.err("Namespace not found: " + part + " (in path: " + namespacePath + ")");
+            }
+            current = children.get(0);
+        }
+        final Namespace targetNs = current;
+
+        List<Map<String, Object>> functions = new ArrayList<>();
+        for (Function func : program.getFunctionManager().getFunctions(true)) {
+            if (func.getParentNamespace() != null && func.getParentNamespace().equals(targetNs)) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.putAll(ServiceUtils.addressToJson(func.getEntryPoint(), program));
+                item.put("name", func.getName());
+                item.put("namespace", namespacePath);
+                functions.add(item);
+            }
+        }
+
+        int total = functions.size();
+        int end = Math.min(offset + limit, total);
+        List<Map<String, Object>> page = offset < total ? functions.subList(offset, end) : new ArrayList<>();
+
+        return Response.ok(JsonHelper.mapOf(
+            "namespace", namespacePath,
+            "total", total,
+            "offset", offset,
+            "limit", limit,
+            "functions", page
+        ));
+    }
+
     @McpTool(path = "/list_data_items", description = "List defined data items", category = "listing")
     public Response listDefinedData(
             @Param(value = "offset", defaultValue = "0") int offset,

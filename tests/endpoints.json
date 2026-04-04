@@ -1,7 +1,7 @@
 {
   "version": "4.3.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 197,
+  "total_endpoints": 198,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -145,6 +145,18 @@
         "program"
       ],
       "description": "List all namespaces"
+    },
+    {
+      "path": "/list_functions_in_namespace",
+      "method": "GET",
+      "category": "listing",
+      "params": [
+        "namespace",
+        "offset",
+        "limit",
+        "program"
+      ],
+      "description": "List all functions within a namespace"
     },
     {
       "path": "/list_data_items",

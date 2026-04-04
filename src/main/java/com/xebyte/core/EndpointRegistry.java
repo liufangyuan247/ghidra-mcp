@@ -384,6 +384,10 @@ public class EndpointRegistry {
             params(qInt("offset", 0), qInt("limit", 100), pProg()),
             (q, b) -> listingService.listNamespaces(num(q, "offset", 0), num(q, "limit", 100), str(q, "program")));
 
+        get("/list_functions_in_namespace", "List all functions within a namespace",
+            params(qStr("namespace", "Namespace path, e.g. MyClass or A::B"), qInt("offset", 0), qInt("limit", 1000), pProg()),
+            (q, b) -> listingService.listFunctionsInNamespace(str(q, "namespace"), num(q, "offset", 0), num(q, "limit", 1000), str(q, "program")));
+
         get("/list_data_items", "List defined data items",
             params(qInt("offset", 0), qInt("limit", 100), pProg()),
             (q, b) -> listingService.listDefinedData(num(q, "offset", 0), num(q, "limit", 100), str(q, "program")));
