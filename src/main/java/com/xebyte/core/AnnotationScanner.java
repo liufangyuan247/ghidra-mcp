@@ -258,7 +258,19 @@ public class AnnotationScanner {
             return convertStringMap(body, binding.param.value());
 
         } else if (type == List.class) {
-            return ServiceUtils.convertToMapList(raw);
+            if (!(raw instanceof List<?>)) return ServiceUtils.convertToMapList(raw);
+            List<?> rawList = (List<?>) raw;
+            // If the list contains Maps, use the existing map-list conversion (e.g. decompiler_comments).
+            // Otherwise convert each element to String so that List<String> params (e.g. function_addresses)
+            // work correctly even when the JSON values are numbers.
+            if (!rawList.isEmpty() && rawList.get(0) instanceof Map<?, ?>) {
+                return ServiceUtils.convertToMapList(raw);
+            }
+            List<String> stringList = new ArrayList<>();
+            for (Object item : rawList) {
+                if (item != null) stringList.add(String.valueOf(item));
+            }
+            return stringList;
 
         } else if (type == Object.class) {
             return raw;

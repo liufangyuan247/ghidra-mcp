@@ -494,6 +494,20 @@ public class EndpointRegistry {
             (q, b) -> functionService.moveFunctionToNamespace(bodyStr(b, "function_address"),
                 bodyStr(b, "namespace"), bodyBool(b, "create_if_missing", true), str(q, "program")));
 
+        post("/batch_move_functions_to_namespace", "Move multiple functions to a target namespace",
+            params(bArr("function_addresses"), bStr("namespace"), bBool("create_if_missing"), pProg()),
+            (q, b) -> {
+            @SuppressWarnings("unchecked")
+            List<Object> rawAddresses = b.get("function_addresses") instanceof List ?
+                (List<Object>) b.get("function_addresses") : Collections.emptyList();
+            List<String> functionAddresses = new ArrayList<>();
+            for (Object raw : rawAddresses) {
+                functionAddresses.add(raw != null ? String.valueOf(raw) : null);
+            }
+            return functionService.batchMoveFunctionsToNamespace(
+                functionAddresses, bodyStr(b, "namespace"), bodyBool(b, "create_if_missing", true), str(q, "program"));
+        });
+
         post("/move_function_to_global_namespace", "Move function to global namespace",
             params(bStr("function_address"), pProg()),
             (q, b) -> functionService.moveFunctionToGlobalNamespace(bodyStr(b, "function_address"), str(q, "program")));

@@ -995,6 +995,146 @@ public class FunctionService {
         return moveFunctionToNamespace(functionAddress, namespacePath, createIfMissing, null);
     }
 
+        /**
+         * Move multiple functions to one target namespace in a single write transaction.
+         */
+    @McpTool(path = "/batch_move_functions_to_namespace", method = "POST", description = "Move multiple functions to namespaces", category = "function")
+    public Response batchMoveFunctionsToNamespace(
+             @Param(value = "function_addresses", source = ParamSource.BODY,
+                 description = "Array of function addresses or names") List<String> functionAddresses,
+             @Param(value = "namespace", source = ParamSource.BODY,
+                 description = "Target namespace path, e.g. A::B") String namespacePath,
+             @Param(value = "create_if_missing", source = ParamSource.BODY, defaultValue = "true") boolean createIfMissing,
+            @Param(value = "program", source = ParamSource.BODY) String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+
+         if (functionAddresses == null || functionAddresses.isEmpty()) {
+             return Response.err("function_addresses array is required and must not be empty");
+         }
+         if (namespacePath == null || namespacePath.trim().isEmpty()) {
+             return Response.err("namespace is required");
+        }
+
+        final List<Map<String, Object>> results = new ArrayList<>();
+        final AtomicInteger movedCount = new AtomicInteger(0);
+        final AtomicInteger skippedCount = new AtomicInteger(0);
+        final AtomicInteger failedCount = new AtomicInteger(0);
+        final AtomicReference<String> errorMsg = new AtomicReference<>(null);
+
+        try {
+            threadingStrategy.executeWrite(program, "Batch move functions to namespaces", () -> {
+                try {
+                    String normalized = normalizeNamespacePath(namespacePath);
+                    Namespace targetNs = resolveOrCreateNamespacePath(program, normalized, createIfMissing);
+                    if (targetNs == null) {
+                        errorMsg.set("Namespace not found: " + normalized +
+                            (createIfMissing ? " (creation failed)" : ""));
+                        return null;
+                    }
+
+                    int index = 0;
+                    for (String functionAddress : functionAddresses) {
+                        index++;
+                        Map<String, Object> item = new HashMap<>();
+                        item.put("index", index);
+                        item.put("namespace", buildNamespacePath(targetNs));
+                        item.put("create_if_missing", createIfMissing);
+
+                        item.put("function_address", functionAddress);
+
+                        if (functionAddress == null || functionAddress.trim().isEmpty()) {
+                            failedCount.incrementAndGet();
+                            item.put("success", false);
+                            item.put("status", "failed");
+                            item.put("error", "function_address is required");
+                            results.add(item);
+                            continue;
+                        }
+
+                        try {
+                            Function func = ServiceUtils.resolveFunction(program, functionAddress);
+                            if (func == null) {
+                                failedCount.incrementAndGet();
+                                item.put("success", false);
+                                item.put("status", "failed");
+                                item.put("error", "No function found for " + functionAddress);
+                                results.add(item);
+                                continue;
+                            }
+
+                            Namespace oldNs = func.getParentNamespace();
+                            String oldNsPath = oldNs != null ? buildNamespacePath(oldNs) : "<global>";
+                            String targetNsPath = buildNamespacePath(targetNs);
+
+                            item.put("function", func.getName());
+                            item.put("from_namespace", oldNsPath);
+                            item.put("to_namespace", targetNsPath);
+
+                            if (oldNs != null && oldNs.equals(targetNs)) {
+                                skippedCount.incrementAndGet();
+                                item.put("success", true);
+                                item.put("status", "skipped");
+                                item.put("message", "Function is already in target namespace");
+                                results.add(item);
+                                continue;
+                            }
+
+                            func.setParentNamespace(targetNs);
+                            movedCount.incrementAndGet();
+                            item.put("success", true);
+                            item.put("status", "moved");
+                            item.put("message", "Moved function '" + func.getName() + "' to namespace '" + targetNsPath + "'");
+                            results.add(item);
+                        } catch (Exception e) {
+                            failedCount.incrementAndGet();
+                            item.put("success", false);
+                            item.put("status", "failed");
+                            item.put("error", "Failed to move function: " + e.getMessage());
+                            results.add(item);
+                        }
+                    }
+                } catch (Exception e) {
+                    errorMsg.set("Failed to batch move functions to namespaces: " + e.getMessage());
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            return Response.err("Failed to execute on Swing thread: " + e.getMessage());
+        }
+
+        if (errorMsg.get() != null) {
+            return Response.err(errorMsg.get());
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", failedCount.get() == 0);
+        response.put("namespace", normalizeNamespacePath(namespacePath));
+        response.put("total", functionAddresses.size());
+        response.put("moved", movedCount.get());
+        response.put("skipped", skippedCount.get());
+        if (failedCount.get() > 0) {
+            response.put("failed", failedCount.get());
+            List<Map<String, Object>> failedItems = new ArrayList<>();
+            for (Map<String, Object> item : results) {
+                if (Boolean.FALSE.equals(item.get("success"))) {
+                    failedItems.add(item);
+                }
+            }
+            response.put("errors", failedItems);
+            response.put("message", "Batch namespace move completed with " + failedCount.get() + " failure(s)");
+        } else {
+            response.put("message", "Batch namespace move completed: " + movedCount.get() + " moved, " + skippedCount.get() + " skipped");
+        }
+        return Response.ok(response);
+    }
+
+    public Response batchMoveFunctionsToNamespace(List<String> functionAddresses, String namespacePath,
+                                                  boolean createIfMissing) {
+        return batchMoveFunctionsToNamespace(functionAddresses, namespacePath, createIfMissing, null);
+    }
+
     /**
      * Move a function out of namespace to global namespace.
      */

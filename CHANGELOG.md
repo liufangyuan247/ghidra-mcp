@@ -11,6 +11,7 @@ Complete version history for the Ghidra MCP Server project.
 - Added `/create_namespace` to create namespace hierarchies (supports paths like `A::B::C`).
 - Added `/delete_namespace` to delete empty namespaces with safety checks.
 - Added `/move_function_to_namespace` to move a function into a target namespace (optional auto-create).
+- Added `/batch_move_functions_to_namespace` to move a list of functions into one target namespace in one request.
 - Added `/move_function_to_global_namespace` to move a function back to global namespace.
 - Registered new endpoints in `EndpointRegistry` and updated `tests/endpoints.json` catalog.
 

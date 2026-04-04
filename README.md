@@ -379,6 +379,7 @@ curl http://127.0.0.1:8089/get_version
 - `create_namespace` - Create namespace hierarchy (supports paths like `A::B::C`)
 - `delete_namespace` - Delete an empty namespace
 - `move_function_to_namespace` - Move function into a namespace (optional auto-create)
+- `batch_move_functions_to_namespace` - Move a list of functions into one target namespace
 - `move_function_to_global_namespace` - Move function back to global namespace
 
 ### Renaming & Documentation
