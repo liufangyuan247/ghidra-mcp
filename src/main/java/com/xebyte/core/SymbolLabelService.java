@@ -142,16 +142,29 @@ public class SymbolLabelService {
                 }
             }
 
-            int transactionId = program.startTransaction("Rename Label");
-            try {
-                targetSymbol.setName(newName, SourceType.USER_DEFINED);
+            final Symbol finalTarget = targetSymbol;
+            final AtomicBoolean success = new AtomicBoolean(false);
+            final AtomicReference<String> errorMsg = new AtomicReference<>();
+            SwingUtilities.invokeAndWait(() -> {
+                int transactionId = program.startTransaction("Rename Label");
+                try {
+                    finalTarget.setName(newName, SourceType.USER_DEFINED);
+                    success.set(true);
+                } catch (Exception e) {
+                    errorMsg.set("Error renaming label: " + e.getMessage());
+                } finally {
+                    program.endTransaction(transactionId, success.get());
+                    if (success.get()) {
+                        program.flushEvents();
+                    }
+                }
+            });
+
+            if (success.get()) {
                 return Response.ok(JsonHelper.mapOf("status", "success", "message",
                         "Renamed label from '" + oldName + "' to '" + newName + "' at address " + addressStr));
-            } catch (Exception e) {
-                return Response.err("Error renaming label: " + e.getMessage());
-            } finally {
-                program.endTransaction(transactionId, true);
             }
+            return Response.err(errorMsg.get() != null ? errorMsg.get() : "Unknown error");
 
         } catch (Exception e) {
             return Response.err("Error processing request: " + e.getMessage());
@@ -207,20 +220,32 @@ public class SymbolLabelService {
                 }
             }
 
-            int transactionId = program.startTransaction("Create Label");
-            try {
-                Symbol newSymbol = symbolTable.createLabel(address, labelName, SourceType.USER_DEFINED);
-                if (newSymbol != null) {
-                    return Response.ok(JsonHelper.mapOf("status", "success", "message",
-                            "Created label '" + labelName + "' at address " + addressStr));
-                } else {
-                    return Response.err("Failed to create label '" + labelName + "' at address " + addressStr);
+            final AtomicBoolean success = new AtomicBoolean(false);
+            final AtomicReference<String> errorMsg = new AtomicReference<>();
+            SwingUtilities.invokeAndWait(() -> {
+                int transactionId = program.startTransaction("Create Label");
+                try {
+                    Symbol newSymbol = symbolTable.createLabel(address, labelName, SourceType.USER_DEFINED);
+                    if (newSymbol != null) {
+                        success.set(true);
+                    } else {
+                        errorMsg.set("Failed to create label '" + labelName + "' at address " + addressStr);
+                    }
+                } catch (Exception e) {
+                    errorMsg.set("Error creating label: " + e.getMessage());
+                } finally {
+                    program.endTransaction(transactionId, success.get());
+                    if (success.get()) {
+                        program.flushEvents();
+                    }
                 }
-            } catch (Exception e) {
-                return Response.err("Error creating label: " + e.getMessage());
-            } finally {
-                program.endTransaction(transactionId, true);
+            });
+
+            if (success.get()) {
+                return Response.ok(JsonHelper.mapOf("status", "success", "message",
+                        "Created label '" + labelName + "' at address " + addressStr));
             }
+            return Response.err(errorMsg.get() != null ? errorMsg.get() : "Unknown error");
 
         } catch (Exception e) {
             return Response.err("Error processing request: " + e.getMessage());

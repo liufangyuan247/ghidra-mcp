@@ -64,6 +64,9 @@ public class CommentService {
                     Msg.error(this, "Error setting " + transactionName.toLowerCase(), e);
                 } finally {
                     program.endTransaction(tx, success.get());
+                    if (success.get()) {
+                        program.flushEvents();
+                    }
                 }
             });
         } catch (Exception e) {

@@ -775,42 +775,41 @@ public class FunctionService {
     }
 
     /**
-     * Create a namespace hierarchy (supports paths like "A::B::C").
+     * Create a GhidraClass in the symbol table (supports paths like "A::B::C").
+     * A GhidraClass is required for the 'this' pointer to be correctly typed as ClassName*.
      */
-    @McpTool(path = "/create_namespace", method = "POST", description = "Create namespace hierarchy", category = "function")
-    public Response createNamespace(
-            @Param(value = "namespace", source = ParamSource.BODY,
-                   description = "Namespace path to create, e.g. A::B::C") String namespacePath,
+    @McpTool(path = "/create_class", method = "POST", description = "Create a GhidraClass so that __thiscall functions moved under it get a correctly-typed this pointer", category = "function")
+    public Response createClass(
+            @Param(value = "class_name", source = ParamSource.BODY,
+                   description = "Class name or path, e.g. ActorHuman or Engine::Player") String className,
             @Param(value = "program", source = ParamSource.BODY) String programName) {
         ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
         if (pe.hasError()) return pe.error();
         Program program = pe.program();
 
-        if (namespacePath == null || namespacePath.trim().isEmpty()) {
-            return Response.err("Namespace path is required");
+        if (className == null || className.trim().isEmpty()) {
+            return Response.err("class_name is required");
         }
 
         final AtomicReference<String> createdPath = new AtomicReference<>(null);
         final AtomicReference<String> errorMsg = new AtomicReference<>(null);
 
         try {
-            threadingStrategy.executeWrite(program, "Create namespace", () -> {
+            threadingStrategy.executeWrite(program, "Create class", () -> {
                 try {
-                    String normalized = normalizeNamespacePath(namespacePath);
+                    String normalized = normalizeNamespacePath(className);
                     if (normalized.isEmpty()) {
-                        errorMsg.set("Namespace path is invalid");
+                        errorMsg.set("class_name is invalid");
                         return null;
                     }
-
-                    Namespace ns = resolveOrCreateNamespacePath(program, normalized, true);
+                    Namespace ns = resolveOrCreateClassPath(program, normalized, true);
                     if (ns == null) {
-                        errorMsg.set("Failed to create namespace: " + normalized);
+                        errorMsg.set("Failed to create class: " + normalized);
                         return null;
                     }
-
                     createdPath.set(buildNamespacePath(ns));
                 } catch (Exception e) {
-                    errorMsg.set("Failed to create namespace: " + e.getMessage());
+                    errorMsg.set("Failed to create class: " + e.getMessage());
                 }
                 return null;
             });
@@ -818,73 +817,67 @@ public class FunctionService {
             return Response.err("Failed to execute on Swing thread: " + e.getMessage());
         }
 
-        if (errorMsg.get() != null) {
-            return Response.err(errorMsg.get());
-        }
-
+        if (errorMsg.get() != null) return Response.err(errorMsg.get());
         return Response.ok(JsonHelper.mapOf(
             "success", true,
-            "namespace", createdPath.get(),
-            "message", "Namespace created: " + createdPath.get()
+            "class", createdPath.get(),
+            "message", "GhidraClass created: " + createdPath.get()
         ));
     }
 
-    public Response createNamespace(String namespacePath) {
-        return createNamespace(namespacePath, null);
+    public Response createClass(String className) {
+        return createClass(className, null);
     }
 
     /**
-     * Delete a namespace if it is empty (no symbols/functions under it).
+     * Delete a GhidraClass if it has no children.
      */
-    @McpTool(path = "/delete_namespace", method = "POST", description = "Delete an empty namespace", category = "function")
-    public Response deleteNamespace(
-            @Param(value = "namespace", source = ParamSource.BODY,
-                   description = "Namespace path, e.g. A::B::C") String namespacePath,
+    @McpTool(path = "/delete_class", method = "POST", description = "Delete a GhidraClass (must be empty)", category = "function")
+    public Response deleteClass(
+            @Param(value = "class_name", source = ParamSource.BODY,
+                   description = "Class name or path, e.g. ActorHuman") String className,
             @Param(value = "program", source = ParamSource.BODY) String programName) {
         ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
         if (pe.hasError()) return pe.error();
         Program program = pe.program();
 
-        if (namespacePath == null || namespacePath.trim().isEmpty()) {
-            return Response.err("Namespace path is required");
+        if (className == null || className.trim().isEmpty()) {
+            return Response.err("class_name is required");
         }
 
         final AtomicReference<String> deletedPath = new AtomicReference<>(null);
         final AtomicReference<String> errorMsg = new AtomicReference<>(null);
 
         try {
-            threadingStrategy.executeWrite(program, "Delete namespace", () -> {
+            threadingStrategy.executeWrite(program, "Delete class", () -> {
                 try {
-                    String normalized = normalizeNamespacePath(namespacePath);
-                    Namespace ns = resolveOrCreateNamespacePath(program, normalized, false);
+                    String normalized = normalizeNamespacePath(className);
+                    Namespace ns = resolveOrCreateClassPath(program, normalized, false);
                     if (ns == null) {
-                        errorMsg.set("Namespace not found: " + normalized);
+                        errorMsg.set("Class not found: " + normalized);
                         return null;
                     }
                     if (ns.isGlobal()) {
                         errorMsg.set("Cannot delete global namespace");
                         return null;
                     }
-
                     SymbolTable symbolTable = program.getSymbolTable();
                     for (Symbol symbol : symbolTable.getAllSymbols(true)) {
                         Namespace parent = symbol.getParentNamespace();
                         if (parent != null && parent.equals(ns)) {
-                            errorMsg.set("Namespace is not empty: " + normalized +
-                                ". Move or delete child symbols/functions first.");
+                            errorMsg.set("Class is not empty: " + normalized +
+                                ". Move or delete child functions first.");
                             return null;
                         }
                     }
-
                     Symbol nsSymbol = ns.getSymbol();
                     if (nsSymbol == null || !nsSymbol.delete()) {
-                        errorMsg.set("Failed to delete namespace: " + normalized);
+                        errorMsg.set("Failed to delete class: " + normalized);
                         return null;
                     }
-
                     deletedPath.set(normalized);
                 } catch (Exception e) {
-                    errorMsg.set("Failed to delete namespace: " + e.getMessage());
+                    errorMsg.set("Failed to delete class: " + e.getMessage());
                 }
                 return null;
             });
@@ -892,30 +885,28 @@ public class FunctionService {
             return Response.err("Failed to execute on Swing thread: " + e.getMessage());
         }
 
-        if (errorMsg.get() != null) {
-            return Response.err(errorMsg.get());
-        }
-
+        if (errorMsg.get() != null) return Response.err(errorMsg.get());
         return Response.ok(JsonHelper.mapOf(
             "success", true,
-            "namespace", deletedPath.get(),
-            "message", "Namespace deleted: " + deletedPath.get()
+            "class", deletedPath.get(),
+            "message", "GhidraClass deleted: " + deletedPath.get()
         ));
     }
 
-    public Response deleteNamespace(String namespacePath) {
-        return deleteNamespace(namespacePath, null);
+    public Response deleteClass(String className) {
+        return deleteClass(className, null);
     }
 
     /**
-     * Move a function to a namespace path. Optionally creates missing namespace segments.
+     * Move a function into a GhidraClass. Creates the class if it does not exist.
+     * After moving, __thiscall functions automatically get a correctly-typed this pointer.
      */
-    @McpTool(path = "/move_function_to_namespace", method = "POST", description = "Move function to namespace", category = "function")
-    public Response moveFunctionToNamespace(
+    @McpTool(path = "/move_function_to_class", method = "POST", description = "Move a function into a GhidraClass so its this pointer is correctly typed as ClassName*", category = "function")
+    public Response moveFunctionToClass(
             @Param(value = "function_address", source = ParamSource.BODY,
                    description = "Function address or name") String functionAddress,
-            @Param(value = "namespace", source = ParamSource.BODY,
-                   description = "Target namespace path, e.g. A::B") String namespacePath,
+            @Param(value = "class_name", source = ParamSource.BODY,
+                   description = "Target class name, e.g. ActorHuman") String className,
             @Param(value = "create_if_missing", source = ParamSource.BODY, defaultValue = "true") boolean createIfMissing,
             @Param(value = "program", source = ParamSource.BODY) String programName) {
         ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
@@ -923,58 +914,48 @@ public class FunctionService {
         Program program = pe.program();
 
         if (functionAddress == null || functionAddress.trim().isEmpty()) {
-            return Response.err("Function address or name is required");
+            return Response.err("function_address is required");
         }
-        if (namespacePath == null || namespacePath.trim().isEmpty()) {
-            return Response.err("Namespace path is required");
+        if (className == null || className.trim().isEmpty()) {
+            return Response.err("class_name is required");
         }
 
         final AtomicReference<Map<String, Object>> resultData = new AtomicReference<>(null);
         final AtomicReference<String> errorMsg = new AtomicReference<>(null);
 
         try {
-            threadingStrategy.executeWrite(program, "Move function to namespace", () -> {
+            threadingStrategy.executeWrite(program, "Move function to class", () -> {
                 try {
                     Function func = ServiceUtils.resolveFunction(program, functionAddress);
                     if (func == null) {
                         errorMsg.set("No function found for " + functionAddress);
                         return null;
                     }
-
-                    String normalized = normalizeNamespacePath(namespacePath);
-                    Namespace targetNs = resolveOrCreateNamespacePath(program, normalized, createIfMissing);
+                    String normalized = normalizeNamespacePath(className);
+                    Namespace targetNs = resolveOrCreateClassPath(program, normalized, createIfMissing);
                     if (targetNs == null) {
-                        errorMsg.set("Namespace not found: " + normalized +
+                        errorMsg.set("Class not found: " + normalized +
                             (createIfMissing ? " (creation failed)" : ""));
                         return null;
                     }
-
                     Namespace oldNs = func.getParentNamespace();
                     String oldNsPath = oldNs != null ? buildNamespacePath(oldNs) : "<global>";
-
                     if (oldNs != null && oldNs.equals(targetNs)) {
                         resultData.set(JsonHelper.mapOf(
-                            "success", true,
-                            "function", func.getName(),
-                            "from_namespace", oldNsPath,
-                            "to_namespace", buildNamespacePath(targetNs),
-                            "message", "Function is already in target namespace"
+                            "success", true, "function", func.getName(),
+                            "from_class", oldNsPath, "to_class", buildNamespacePath(targetNs),
+                            "message", "Function is already in target class"
                         ));
                         return null;
                     }
-
                     func.setParentNamespace(targetNs);
-
                     resultData.set(JsonHelper.mapOf(
-                        "success", true,
-                        "function", func.getName(),
-                        "from_namespace", oldNsPath,
-                        "to_namespace", buildNamespacePath(targetNs),
-                        "message", "Moved function '" + func.getName() + "' to namespace '" +
-                            buildNamespacePath(targetNs) + "'"
+                        "success", true, "function", func.getName(),
+                        "from_class", oldNsPath, "to_class", buildNamespacePath(targetNs),
+                        "message", "Moved '" + func.getName() + "' to class '" + buildNamespacePath(targetNs) + "'"
                     ));
                 } catch (Exception e) {
-                    errorMsg.set("Failed to move function to namespace: " + e.getMessage());
+                    errorMsg.set("Failed to move function to class: " + e.getMessage());
                 }
                 return null;
             });
@@ -982,39 +963,35 @@ public class FunctionService {
             return Response.err("Failed to execute on Swing thread: " + e.getMessage());
         }
 
-        if (errorMsg.get() != null) {
-            return Response.err(errorMsg.get());
-        }
-        if (resultData.get() != null) {
-            return Response.ok(resultData.get());
-        }
+        if (errorMsg.get() != null) return Response.err(errorMsg.get());
+        if (resultData.get() != null) return Response.ok(resultData.get());
         return Response.err("Unknown failure");
     }
 
-    public Response moveFunctionToNamespace(String functionAddress, String namespacePath, boolean createIfMissing) {
-        return moveFunctionToNamespace(functionAddress, namespacePath, createIfMissing, null);
+    public Response moveFunctionToClass(String functionAddress, String className, boolean createIfMissing) {
+        return moveFunctionToClass(functionAddress, className, createIfMissing, null);
     }
 
-        /**
-         * Move multiple functions to one target namespace in a single write transaction.
-         */
-    @McpTool(path = "/batch_move_functions_to_namespace", method = "POST", description = "Move multiple functions to namespaces", category = "function")
-    public Response batchMoveFunctionsToNamespace(
-             @Param(value = "function_addresses", source = ParamSource.BODY,
-                 description = "Array of function addresses or names") List<String> functionAddresses,
-             @Param(value = "namespace", source = ParamSource.BODY,
-                 description = "Target namespace path, e.g. A::B") String namespacePath,
-             @Param(value = "create_if_missing", source = ParamSource.BODY, defaultValue = "true") boolean createIfMissing,
+    /**
+     * Move multiple functions into one GhidraClass in a single write transaction.
+     */
+    @McpTool(path = "/batch_move_functions_to_class", method = "POST", description = "Move multiple functions into a GhidraClass so their this pointers are correctly typed as ClassName*", category = "function")
+    public Response batchMoveFunctionsToClass(
+            @Param(value = "function_addresses", source = ParamSource.BODY,
+                description = "Array of function addresses or names") List<String> functionAddresses,
+            @Param(value = "class_name", source = ParamSource.BODY,
+                description = "Target class name, e.g. ActorHuman") String className,
+            @Param(value = "create_if_missing", source = ParamSource.BODY, defaultValue = "true") boolean createIfMissing,
             @Param(value = "program", source = ParamSource.BODY) String programName) {
         ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
         if (pe.hasError()) return pe.error();
         Program program = pe.program();
 
-         if (functionAddresses == null || functionAddresses.isEmpty()) {
-             return Response.err("function_addresses array is required and must not be empty");
-         }
-         if (namespacePath == null || namespacePath.trim().isEmpty()) {
-             return Response.err("namespace is required");
+        if (functionAddresses == null || functionAddresses.isEmpty()) {
+            return Response.err("function_addresses array is required and must not be empty");
+        }
+        if (className == null || className.trim().isEmpty()) {
+            return Response.err("class_name is required");
         }
 
         final List<Map<String, Object>> results = new ArrayList<>();
@@ -1024,30 +1001,23 @@ public class FunctionService {
         final AtomicReference<String> errorMsg = new AtomicReference<>(null);
 
         try {
-            threadingStrategy.executeWrite(program, "Batch move functions to namespaces", () -> {
+            threadingStrategy.executeWrite(program, "Batch move functions to class", () -> {
                 try {
-                    String normalized = normalizeNamespacePath(namespacePath);
-                    Namespace targetNs = resolveOrCreateNamespacePath(program, normalized, createIfMissing);
+                    String normalized = normalizeNamespacePath(className);
+                    Namespace targetNs = resolveOrCreateClassPath(program, normalized, createIfMissing);
                     if (targetNs == null) {
-                        errorMsg.set("Namespace not found: " + normalized +
+                        errorMsg.set("Class not found: " + normalized +
                             (createIfMissing ? " (creation failed)" : ""));
                         return null;
                     }
 
-                    int index = 0;
                     for (String functionAddress : functionAddresses) {
-                        index++;
                         Map<String, Object> item = new HashMap<>();
-                        item.put("index", index);
-                        item.put("namespace", buildNamespacePath(targetNs));
-                        item.put("create_if_missing", createIfMissing);
-
                         item.put("function_address", functionAddress);
 
                         if (functionAddress == null || functionAddress.trim().isEmpty()) {
                             failedCount.incrementAndGet();
                             item.put("success", false);
-                            item.put("status", "failed");
                             item.put("error", "function_address is required");
                             results.add(item);
                             continue;
@@ -1058,25 +1028,18 @@ public class FunctionService {
                             if (func == null) {
                                 failedCount.incrementAndGet();
                                 item.put("success", false);
-                                item.put("status", "failed");
                                 item.put("error", "No function found for " + functionAddress);
                                 results.add(item);
                                 continue;
                             }
 
                             Namespace oldNs = func.getParentNamespace();
-                            String oldNsPath = oldNs != null ? buildNamespacePath(oldNs) : "<global>";
-                            String targetNsPath = buildNamespacePath(targetNs);
-
                             item.put("function", func.getName());
-                            item.put("from_namespace", oldNsPath);
-                            item.put("to_namespace", targetNsPath);
 
                             if (oldNs != null && oldNs.equals(targetNs)) {
                                 skippedCount.incrementAndGet();
                                 item.put("success", true);
                                 item.put("status", "skipped");
-                                item.put("message", "Function is already in target namespace");
                                 results.add(item);
                                 continue;
                             }
@@ -1085,18 +1048,16 @@ public class FunctionService {
                             movedCount.incrementAndGet();
                             item.put("success", true);
                             item.put("status", "moved");
-                            item.put("message", "Moved function '" + func.getName() + "' to namespace '" + targetNsPath + "'");
                             results.add(item);
                         } catch (Exception e) {
                             failedCount.incrementAndGet();
                             item.put("success", false);
-                            item.put("status", "failed");
-                            item.put("error", "Failed to move function: " + e.getMessage());
+                            item.put("error", "Failed: " + e.getMessage());
                             results.add(item);
                         }
                     }
                 } catch (Exception e) {
-                    errorMsg.set("Failed to batch move functions to namespaces: " + e.getMessage());
+                    errorMsg.set("Batch move failed: " + e.getMessage());
                 }
                 return null;
             });
@@ -1104,13 +1065,11 @@ public class FunctionService {
             return Response.err("Failed to execute on Swing thread: " + e.getMessage());
         }
 
-        if (errorMsg.get() != null) {
-            return Response.err(errorMsg.get());
-        }
+        if (errorMsg.get() != null) return Response.err(errorMsg.get());
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("success", failedCount.get() == 0);
-        response.put("namespace", normalizeNamespacePath(namespacePath));
+        response.put("class", normalizeNamespacePath(className));
         response.put("total", functionAddresses.size());
         response.put("moved", movedCount.get());
         response.put("skipped", skippedCount.get());
@@ -1118,95 +1077,19 @@ public class FunctionService {
             response.put("failed", failedCount.get());
             List<Map<String, Object>> failedItems = new ArrayList<>();
             for (Map<String, Object> item : results) {
-                if (Boolean.FALSE.equals(item.get("success"))) {
-                    failedItems.add(item);
-                }
+                if (Boolean.FALSE.equals(item.get("success"))) failedItems.add(item);
             }
             response.put("errors", failedItems);
-            response.put("message", "Batch namespace move completed with " + failedCount.get() + " failure(s)");
+            response.put("message", "Batch class move completed with " + failedCount.get() + " failure(s)");
         } else {
-            response.put("message", "Batch namespace move completed: " + movedCount.get() + " moved, " + skippedCount.get() + " skipped");
+            response.put("message", "Batch class move completed: " + movedCount.get() + " moved, " + skippedCount.get() + " skipped");
         }
         return Response.ok(response);
     }
 
-    public Response batchMoveFunctionsToNamespace(List<String> functionAddresses, String namespacePath,
-                                                  boolean createIfMissing) {
-        return batchMoveFunctionsToNamespace(functionAddresses, namespacePath, createIfMissing, null);
-    }
-
-    /**
-     * Move a function out of namespace to global namespace.
-     */
-    @McpTool(path = "/move_function_to_global_namespace", method = "POST", description = "Move function to global namespace", category = "function")
-    public Response moveFunctionToGlobalNamespace(
-            @Param(value = "function_address", source = ParamSource.BODY,
-                   description = "Function address or name") String functionAddress,
-            @Param(value = "program", source = ParamSource.BODY) String programName) {
-        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
-        if (pe.hasError()) return pe.error();
-        Program program = pe.program();
-
-        if (functionAddress == null || functionAddress.trim().isEmpty()) {
-            return Response.err("Function address or name is required");
-        }
-
-        final AtomicReference<Map<String, Object>> resultData = new AtomicReference<>(null);
-        final AtomicReference<String> errorMsg = new AtomicReference<>(null);
-
-        try {
-            threadingStrategy.executeWrite(program, "Move function to global namespace", () -> {
-                try {
-                    Function func = ServiceUtils.resolveFunction(program, functionAddress);
-                    if (func == null) {
-                        errorMsg.set("No function found for " + functionAddress);
-                        return null;
-                    }
-
-                    Namespace oldNs = func.getParentNamespace();
-                    Namespace globalNs = program.getGlobalNamespace();
-                    String oldNsPath = oldNs != null ? buildNamespacePath(oldNs) : "<global>";
-
-                    if (oldNs == null || oldNs.isGlobal()) {
-                        resultData.set(JsonHelper.mapOf(
-                            "success", true,
-                            "function", func.getName(),
-                            "from_namespace", oldNsPath,
-                            "to_namespace", "<global>",
-                            "message", "Function is already in global namespace"
-                        ));
-                        return null;
-                    }
-
-                    func.setParentNamespace(globalNs);
-
-                    resultData.set(JsonHelper.mapOf(
-                        "success", true,
-                        "function", func.getName(),
-                        "from_namespace", oldNsPath,
-                        "to_namespace", "<global>",
-                        "message", "Moved function '" + func.getName() + "' to global namespace"
-                    ));
-                } catch (Exception e) {
-                    errorMsg.set("Failed to move function to global namespace: " + e.getMessage());
-                }
-                return null;
-            });
-        } catch (Exception e) {
-            return Response.err("Failed to execute on Swing thread: " + e.getMessage());
-        }
-
-        if (errorMsg.get() != null) {
-            return Response.err(errorMsg.get());
-        }
-        if (resultData.get() != null) {
-            return Response.ok(resultData.get());
-        }
-        return Response.err("Unknown failure");
-    }
-
-    public Response moveFunctionToGlobalNamespace(String functionAddress) {
-        return moveFunctionToGlobalNamespace(functionAddress, null);
+    public Response batchMoveFunctionsToClass(List<String> functionAddresses, String className,
+                                              boolean createIfMissing) {
+        return batchMoveFunctionsToClass(functionAddresses, className, createIfMissing, null);
     }
 
     private String normalizeNamespacePath(String namespacePath) {
@@ -1220,33 +1103,42 @@ public class FunctionService {
         return normalized;
     }
 
-    private Namespace resolveOrCreateNamespacePath(Program program, String namespacePath, boolean createIfMissing)
+    /**
+     * Resolve or create a GhidraClass path. Creates intermediate segments as GhidraClass.
+     * Used so that __thiscall functions moved here get a correctly-typed this pointer.
+     */
+    private Namespace resolveOrCreateClassPath(Program program, String classPath, boolean createIfMissing)
             throws Exception {
         Namespace current = program.getGlobalNamespace();
-        if (namespacePath == null || namespacePath.isEmpty()) {
+        if (classPath == null || classPath.isEmpty()) {
             return current;
         }
 
         SymbolTable symbolTable = program.getSymbolTable();
-        String[] parts = namespacePath.split("::");
+        String[] parts = classPath.split("::");
         for (String rawPart : parts) {
             String part = rawPart.trim();
-            if (part.isEmpty()) {
-                continue;
-            }
+            if (part.isEmpty()) continue;
 
-            Namespace next = symbolTable.getNamespace(part, current);
-            if (next == null) {
-                if (!createIfMissing) {
-                    return null;
+            // Prefer exact GhidraClass match, fall back to any namespace type
+            Namespace next = null;
+            for (Symbol sym : symbolTable.getChildren(current.getSymbol())) {
+                if (sym.getName().equals(part) &&
+                    (sym.getSymbolType() == ghidra.program.model.symbol.SymbolType.CLASS ||
+                     sym.getSymbolType() == ghidra.program.model.symbol.SymbolType.NAMESPACE)) {
+                    next = (Namespace) sym.getObject();
+                    break;
                 }
-                next = symbolTable.createNameSpace(current, part, SourceType.USER_DEFINED);
+            }
+            if (next == null) {
+                if (!createIfMissing) return null;
+                next = symbolTable.createClass(current, part, SourceType.USER_DEFINED);
             }
             current = next;
         }
-
         return current;
     }
+
 
     private String buildNamespacePath(Namespace namespace) {
         if (namespace == null || namespace.isGlobal()) {

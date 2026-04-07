@@ -485,21 +485,21 @@ public class EndpointRegistry {
             params(bStr("function_address"), bStr("new_name"), pProg()),
             (q, b) -> functionService.renameFunctionByAddress(bodyStr(b, "function_address"), bodyStr(b, "new_name"), str(q, "program")));
 
-        post("/create_namespace", "Create namespace hierarchy",
-            params(bStr("namespace"), pProg()),
-            (q, b) -> functionService.createNamespace(bodyStr(b, "namespace"), str(q, "program")));
+        post("/create_class", "Create a GhidraClass",
+            params(bStr("class_name"), pProg()),
+            (q, b) -> functionService.createClass(bodyStr(b, "class_name"), str(q, "program")));
 
-        post("/delete_namespace", "Delete an empty namespace",
-            params(bStr("namespace"), pProg()),
-            (q, b) -> functionService.deleteNamespace(bodyStr(b, "namespace"), str(q, "program")));
+        post("/delete_class", "Delete an empty GhidraClass",
+            params(bStr("class_name"), pProg()),
+            (q, b) -> functionService.deleteClass(bodyStr(b, "class_name"), str(q, "program")));
 
-        post("/move_function_to_namespace", "Move function to namespace",
-            params(bStr("function_address"), bStr("namespace"), bBool("create_if_missing"), pProg()),
-            (q, b) -> functionService.moveFunctionToNamespace(bodyStr(b, "function_address"),
-                bodyStr(b, "namespace"), bodyBool(b, "create_if_missing", true), str(q, "program")));
+        post("/move_function_to_class", "Move function into a GhidraClass",
+            params(bStr("function_address"), bStr("class_name"), bBool("create_if_missing"), pProg()),
+            (q, b) -> functionService.moveFunctionToClass(bodyStr(b, "function_address"),
+                bodyStr(b, "class_name"), bodyBool(b, "create_if_missing", true), str(q, "program")));
 
-        post("/batch_move_functions_to_namespace", "Move multiple functions to a target namespace",
-            params(bArr("function_addresses"), bStr("namespace"), bBool("create_if_missing"), pProg()),
+        post("/batch_move_functions_to_class", "Move multiple functions into a GhidraClass",
+            params(bArr("function_addresses"), bStr("class_name"), bBool("create_if_missing"), pProg()),
             (q, b) -> {
             @SuppressWarnings("unchecked")
             List<Object> rawAddresses = b.get("function_addresses") instanceof List ?
@@ -508,13 +508,9 @@ public class EndpointRegistry {
             for (Object raw : rawAddresses) {
                 functionAddresses.add(raw != null ? String.valueOf(raw) : null);
             }
-            return functionService.batchMoveFunctionsToNamespace(
-                functionAddresses, bodyStr(b, "namespace"), bodyBool(b, "create_if_missing", true), str(q, "program"));
+            return functionService.batchMoveFunctionsToClass(
+                functionAddresses, bodyStr(b, "class_name"), bodyBool(b, "create_if_missing", true), str(q, "program"));
         });
-
-        post("/move_function_to_global_namespace", "Move function to global namespace",
-            params(bStr("function_address"), pProg()),
-            (q, b) -> functionService.moveFunctionToGlobalNamespace(bodyStr(b, "function_address"), str(q, "program")));
 
         post("/rename_variable", "Rename a variable in a function",
             params(bStr("functionName"), bStr("oldName"), bStr("newName"), pProg()),

@@ -1,7 +1,7 @@
 {
   "version": "4.3.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 198,
+  "total_endpoints": 197,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -587,58 +587,48 @@
       "description": "Rename function by address"
     },
     {
-      "path": "/create_namespace",
+      "path": "/create_class",
       "method": "POST",
-      "category": "analysis",
+      "category": "function",
       "params": [
-        "namespace",
+        "class_name",
         "program"
       ],
-      "description": "Create namespace hierarchy"
+      "description": "Create a GhidraClass"
     },
     {
-      "path": "/delete_namespace",
+      "path": "/delete_class",
       "method": "POST",
-      "category": "analysis",
+      "category": "function",
       "params": [
-        "namespace",
+        "class_name",
         "program"
       ],
-      "description": "Delete empty namespace"
+      "description": "Delete empty GhidraClass"
     },
     {
-      "path": "/move_function_to_namespace",
+      "path": "/move_function_to_class",
       "method": "POST",
-      "category": "analysis",
+      "category": "function",
       "params": [
         "function_address",
-        "namespace",
+        "class_name",
         "create_if_missing",
         "program"
       ],
-      "description": "Move function to namespace"
+      "description": "Move function into a GhidraClass"
     },
     {
-      "path": "/batch_move_functions_to_namespace",
+      "path": "/batch_move_functions_to_class",
       "method": "POST",
-      "category": "analysis",
+      "category": "function",
       "params": [
         "function_addresses",
-        "namespace",
+        "class_name",
         "create_if_missing",
         "program"
       ],
-      "description": "Move multiple functions to a target namespace"
-    },
-    {
-      "path": "/move_function_to_global_namespace",
-      "method": "POST",
-      "category": "analysis",
-      "params": [
-        "function_address",
-        "program"
-      ],
-      "description": "Move function to global namespace"
+      "description": "Move multiple functions into a GhidraClass"
     },
     {
       "path": "/rename_data",

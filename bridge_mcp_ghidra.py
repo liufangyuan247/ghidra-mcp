@@ -40,7 +40,7 @@ REQUEST_TIMEOUT = 30
 
 # Per-endpoint timeout overrides for expensive operations
 ENDPOINT_TIMEOUTS = {
-    "batch_move_functions_to_namespace": 120,
+    "batch_move_functions_to_class": 120,
     "batch_rename_variables": 120,
     "batch_set_comments": 120,
     "analyze_function_complete": 120,
