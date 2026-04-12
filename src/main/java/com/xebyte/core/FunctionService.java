@@ -2261,14 +2261,86 @@ public class FunctionService {
                     }
                 }
 
-                // Rename local variables
+                // Rename local variables — two-pass strategy:
+                // Pass 1: DB-layer locals (getLocalVariables / getAllVariables)
+                // Pass 2: decompiler-layer HighFunction symbols (uVar*, state, etc.)
                 if (localRenames != null && !localRenames.isEmpty()) {
+                    Set<String> renamedByDB = new HashSet<>();
+
+                    // Pass 1a: getLocalVariables
                     Variable[] locals = func.getLocalVariables();
                     for (Variable local : locals) {
                         String newName = localRenames.get(local.getName());
                         if (newName != null && !newName.isEmpty()) {
-                            local.setName(newName, SourceType.USER_DEFINED);
-                            localsRenamed.incrementAndGet();
+                            try {
+                                local.setName(newName, SourceType.USER_DEFINED);
+                                localsRenamed.incrementAndGet();
+                                renamedByDB.add(local.getName());
+                            } catch (Exception ex) {
+                                Msg.warn(this, "DB local rename failed for " + local.getName() + ": " + ex.getMessage());
+                            }
+                        }
+                    }
+
+                    // Pass 1b: getAllVariables (catches any remaining storage-based vars)
+                    try {
+                        for (Variable var : func.getAllVariables()) {
+                            String oldName = var.getName();
+                            String newName = localRenames.get(oldName);
+                            if (newName != null && !newName.isEmpty() && !renamedByDB.contains(oldName)) {
+                                try {
+                                    var.setName(newName, SourceType.USER_DEFINED);
+                                    localsRenamed.incrementAndGet();
+                                    renamedByDB.add(oldName);
+                                } catch (Exception ex) {
+                                    Msg.warn(this, "Storage var rename failed for " + oldName + ": " + ex.getMessage());
+                                }
+                            }
+                        }
+                    } catch (Exception ex) {
+                        Msg.warn(this, "getAllVariables pass failed: " + ex.getMessage());
+                    }
+
+                    // Pass 2: decompiler HighFunction symbols for any keys not yet matched
+                    Set<String> remaining = new HashSet<>(localRenames.keySet());
+                    remaining.removeAll(renamedByDB);
+                    if (!remaining.isEmpty()) {
+                        try {
+                            DecompInterface decomp = new DecompInterface();
+                            decomp.openProgram(program);
+                            DecompileResults dr = decomp.decompileFunction(func, DECOMPILE_TIMEOUT_SECONDS, new ConsoleTaskMonitor());
+                            if (dr != null && dr.decompileCompleted()) {
+                                HighFunction hf = dr.getHighFunction();
+                                if (hf != null) {
+                                    LocalSymbolMap lsm = hf.getLocalSymbolMap();
+                                    if (lsm != null) {
+                                        // Commit params if prototype differs
+                                        if (checkFullCommit(null, hf)) {
+                                            HighFunctionDBUtil.commitParamsToDatabase(hf, false,
+                                                ReturnCommitOption.NO_COMMIT, func.getSignatureSource());
+                                        }
+                                        Iterator<HighSymbol> syms = lsm.getSymbols();
+                                        while (syms.hasNext()) {
+                                            HighSymbol sym = syms.next();
+                                            String oldName = sym.getName();
+                                            if (!remaining.contains(oldName)) continue;
+                                            String newName = localRenames.get(oldName);
+                                            if (newName != null && !newName.isEmpty()) {
+                                                try {
+                                                    HighFunctionDBUtil.updateDBVariable(sym, newName, null, SourceType.USER_DEFINED);
+                                                    localsRenamed.incrementAndGet();
+                                                    remaining.remove(oldName);
+                                                } catch (Exception ex) {
+                                                    Msg.warn(this, "HighSymbol rename failed for " + oldName + ": " + ex.getMessage());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            decomp.dispose();
+                        } catch (Exception ex) {
+                            Msg.warn(this, "Decompiler pass in batch_rename_function_components failed: " + ex.getMessage());
                         }
                     }
                 }
@@ -2684,7 +2756,9 @@ public class FunctionService {
      * @param forceIndividual If true, skip batch mode and use individual renames
      * @return JSON result with rename status
      */
-    @McpTool(path = "/batch_rename_variables", method = "POST", description = "Rename multiple variables atomically. On programs with multiple address spaces (e.g., embedded targets), prefix addresses with the space name (mem:1000) to avoid ambiguous resolution.", category = "function")
+    // @McpTool removed: batch_rename_function_components now covers decompiler-layer variable
+    // renaming via its three-pass strategy (DB locals → getAllVariables → HighFunction symbols).
+    // The HTTP endpoint (/batch_rename_variables) and Java method are retained for internal use.
     public Response batchRenameVariables(
             @Param(value = "function_address", paramType = "address", source = ParamSource.BODY,
                    description = "Address in the program. Accepts 0x<hex> (default space) or <space>:<hex> "
