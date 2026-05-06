@@ -1363,6 +1363,9 @@ public class DataTypeService {
                         return;
                     }
 
+                    // Save original field name before any modification
+                    String originalFieldName = targetComponent.getFieldName();
+
                     // If new type is specified, change the field type
                     if (newType != null && !newType.isEmpty()) {
                         DataType newDataType = ServiceUtils.resolveDataType(dtm, newType);
@@ -1371,6 +1374,9 @@ public class DataTypeService {
                             return;
                         }
                         struct.replace(targetComponent.getOrdinal(), newDataType, newDataType.getLength());
+                        // Restore field name after replace (replace() loses it!)
+                        DataTypeComponent restored = struct.getComponent(targetComponent.getOrdinal());
+                        restored.setFieldName(originalFieldName);
                     }
 
                     // If new name is specified, change the field name
@@ -1652,6 +1658,52 @@ public class DataTypeService {
             result.append("Failed: ").append(e.getMessage());
         }
 
+        return Response.text(result.toString());
+    }
+
+
+    /**
+     * Rename a struct field by offset
+     */
+    @McpTool(path = "/rename_struct_field_by_offset", method = "POST", description = "Rename a field by offset", category = "datatype")
+    public Response renameStructFieldByOffset(
+            @Param(value = "struct_name", source = ParamSource.BODY) String structName,
+            @Param(value = "offset", source = ParamSource.BODY) int offset,
+            @Param(value = "new_name", source = ParamSource.BODY) String newName,
+            @Param(value = "program", source = ParamSource.BODY) String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+        if (structName == null || structName.isEmpty()) return Response.text("Structure name required");
+        if (newName == null || newName.isEmpty()) return Response.text("New name required");
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Rename struct field by offset");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dataType = ServiceUtils.findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dataType == null) { result.append("Not found: ").append(structName); return; }
+                    if (!(dataType instanceof Structure)) { result.append("Not a structure"); return; }
+
+                    Structure struct = (Structure) dataType;
+                    DataTypeComponent found = null;
+                    for (DataTypeComponent comp : struct.getDefinedComponents()) {
+                        if (comp.getOffset() == offset) { found = comp; break; }
+                    }
+                    if (found == null) { result.append("No field @ ").append(offset); return; }
+
+                    String oldName = found.getFieldName() != null ? found.getFieldName() : "(unnamed)";
+                    found.setFieldName(newName);
+                    result.append("Renamed '").append(oldName).append("' -> '").append(newName).append("' @ ").append(offset).append(" in '").append(structName).append("'");
+                    success.set(true);
+                } catch (Exception e) { result.append("Error: ").append(e.getMessage()); }
+                finally { program.endTransaction(tx, success.get()); }
+            });
+        } catch (InterruptedException | InvocationTargetException e) { result.append("Failed: ").append(e.getMessage()); }
         return Response.text(result.toString());
     }
 

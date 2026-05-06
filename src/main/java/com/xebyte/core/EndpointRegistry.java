@@ -877,6 +877,10 @@ public class EndpointRegistry {
             params(bStr("struct_name"), bInt("offset", 0), pProg()),
             (q, b) -> dataTypeService.removeStructFieldByOffset(bodyStr(b, "struct_name"), bodyInt(b, "offset", 0), str(q, "program")));
 
+        post("/rename_struct_field_by_offset", "Rename struct field by offset",
+            params(bStr("struct_name"), bInt("offset", 0), bStr("new_name"), pProg()),
+            (q, b) -> dataTypeService.renameStructFieldByOffset(bodyStr(b, "struct_name"), bodyInt(b, "offset", 0), bodyStr(b, "new_name"), str(q, "program")));
+
         post("/set_struct_length", "Set structure length/size",
             params(bStr("struct_name"), bInt("length", 0), pProg()),
             (q, b) -> dataTypeService.setStructLength(bodyStr(b, "struct_name"), bodyInt(b, "length", 0), str(q, "program")));
