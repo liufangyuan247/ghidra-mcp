@@ -1546,6 +1546,115 @@ public class DataTypeService {
         return removeStructField(structName, fieldName, null);
     }
 
+
+    /**
+     * Set the total length (size) of a structure
+     */
+    @McpTool(path = "/set_struct_length", method = "POST", description = "Set structure length/size", category = "datatype")
+    public Response setStructLength(
+            @Param(value = "struct_name", source = ParamSource.BODY) String structName,
+            @Param(value = "length", source = ParamSource.BODY) int length,
+            @Param(value = "program", source = ParamSource.BODY, description = "Target program name") String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+        if (structName == null || structName.isEmpty()) return Response.text("Structure name is required");
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Set struct length");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dataType = ServiceUtils.findDataTypeByNameInAllCategories(dtm, structName);
+
+                    if (dataType == null) {
+                        result.append("Structure not found: ").append(structName);
+                        return;
+                    }
+
+                    if (!(dataType instanceof Structure)) {
+                        result.append("Data type '").append(structName).append("' is not a structure");
+                        return;
+                    }
+
+                    Structure struct = (Structure) dataType;
+                    int oldLength = struct.getLength();
+                    struct.setLength(length);
+                    result.append("Structure '").append(structName).append("' resized: ").append(oldLength).append(" -> ").append(length).append(" bytes");
+                    success.set(true);
+
+                } catch (Exception e) {
+                    result.append("Error setting struct length: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            result.append("Failed to execute struct resize on Swing thread: ").append(e.getMessage());
+        }
+
+        return Response.text(result.toString());
+    }
+
+
+    /**
+     * Remove a field from an existing structure by offset
+     */
+    @McpTool(path = "/remove_struct_field_by_offset", method = "POST", description = "Remove a field from a structure by offset", category = "datatype")
+    public Response removeStructFieldByOffset(
+            @Param(value = "struct_name", source = ParamSource.BODY) String structName,
+            @Param(value = "offset", source = ParamSource.BODY) int offset,
+            @Param(value = "program", source = ParamSource.BODY, description = "Target program name") String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+        if (structName == null || structName.isEmpty()) return Response.text("Structure name is required");
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Remove struct field by offset");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dataType = ServiceUtils.findDataTypeByNameInAllCategories(dtm, structName);
+
+                    if (dataType == null) { result.append("Structure not found: ").append(structName); return; }
+                    if (!(dataType instanceof Structure)) { result.append("Not a structure: ").append(structName); return; }
+
+                    Structure struct = (Structure) dataType;
+                    DataTypeComponent foundComponent = null;
+                    for (DataTypeComponent comp : struct.getDefinedComponents()) {
+                        if (comp.getOffset() == offset) { foundComponent = comp; break; }
+                    }
+
+                    if (foundComponent == null) {
+                        result.append("No field at offset ").append(offset).append(" in structure '").append(structName).append("'");
+                        return;
+                    }
+
+                    String fieldName = foundComponent.getFieldName() != null ? foundComponent.getFieldName() : "(unnamed)";
+                    struct.delete(foundComponent.getOrdinal());
+                    result.append("Removed field '").append(fieldName).append("' @ offset ").append(offset).append(" from '").append(structName).append("'");
+                    success.set(true);
+
+                } catch (Exception e) {
+                    result.append("Error removing field: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            result.append("Failed: ").append(e.getMessage());
+        }
+
+        return Response.text(result.toString());
+    }
+
     /**
      * Move a data type to a different category
      */

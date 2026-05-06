@@ -873,6 +873,14 @@ public class EndpointRegistry {
             params(bStr("struct_name"), bStr("field_name"), pProg()),
             (q, b) -> dataTypeService.removeStructField(bodyStr(b, "struct_name"), bodyStr(b, "field_name"), str(q, "program")));
 
+        post("/remove_struct_field_by_offset", "Remove a field from structure by offset",
+            params(bStr("struct_name"), bInt("offset", 0), pProg()),
+            (q, b) -> dataTypeService.removeStructFieldByOffset(bodyStr(b, "struct_name"), bodyInt(b, "offset", 0), str(q, "program")));
+
+        post("/set_struct_length", "Set structure length/size",
+            params(bStr("struct_name"), bInt("length", 0), pProg()),
+            (q, b) -> dataTypeService.setStructLength(bodyStr(b, "struct_name"), bodyInt(b, "length", 0), str(q, "program")));
+
         post("/import_data_types", "Import data types from C source",
             params(bStr("source"), bStr("format")),
             (q, b) -> dataTypeService.importDataTypes(bodyStr(b, "source"), bodyStr(b, "format", "c")));
