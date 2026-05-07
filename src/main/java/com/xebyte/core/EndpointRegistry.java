@@ -884,6 +884,11 @@ public class EndpointRegistry {
         post("/set_struct_length", "Set structure length/size",
             params(bStr("struct_name"), bInt("length", 0), pProg()),
             (q, b) -> dataTypeService.setStructLength(bodyStr(b, "struct_name"), bodyInt(b, "length", 0), str(q, "program")));
+        post("/replace_field_range", "Atomically replace field range [start,end) with new fields",
+            params(bStr("struct_name"), bInt("start_offset", 0), bInt("end_offset", 0), bJson("fields"), pProg()),
+            (q, b) -> dataTypeService.replaceFieldRange(bodyStr(b, "struct_name"), bodyInt(b, "start_offset", 0),
+                bodyInt(b, "end_offset", 0), bodyFieldsJson(b, "fields"), str(q, "program")));
+
 
         post("/import_data_types", "Import data types from C source",
             params(bStr("source"), bStr("format")),

@@ -1709,6 +1709,129 @@ public class DataTypeService {
 
     /**
      * Move a data type to a different category
+    /**
+     * Atomically replace a range of fields [startOffset, endOffset) with new fields.
+     * Unlike remove+add sequence, this doesn't cause cascade offset shifts.
+     * Uses full rebuild approach: collect kept fields, clear struct, re-add all.
+     */
+    @McpTool(path = "/replace_field_range", method = "POST", description = "Atomically replace a field range [start,end) with new fields", category = "datatype")
+    public Response replaceFieldRange(
+            @Param(value = "struct_name", source = ParamSource.BODY) String structName,
+            @Param(value = "start_offset", source = ParamSource.BODY) int startOffset,
+            @Param(value = "end_offset", source = ParamSource.BODY) int endOffset,
+            @Param(value = "fields", source = ParamSource.BODY, fieldsJson = true) String fieldsJson,
+            @Param(value = "program", source = ParamSource.BODY, description = "Target program name") String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+        if (structName == null || structName.isEmpty()) return Response.text("Structure name required");
+        if (startOffset < 0 || endOffset <= startOffset) return Response.text("Invalid offset range");
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Replace field range");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dataType = ServiceUtils.findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dataType == null) { result.append("Not found: ").append(structName); return; }
+                    if (!(dataType instanceof Structure)) { result.append("Not a structure"); return; }
+
+                    Structure struct = (Structure) dataType;
+
+                    // Phase 1: Collect all fields OUTSIDE [startOffset, endOffset)
+                    List<FieldSnapshot> keptFields = new ArrayList<>();
+                    for (DataTypeComponent comp : struct.getDefinedComponents()) {
+                        int off = comp.getOffset();
+                        if (off < startOffset || off >= endOffset) {
+                            keptFields.add(new FieldSnapshot(
+                                comp.getFieldName(),
+                                comp.getDataType(),
+                                comp.getLength(),
+                                off
+                            ));
+                        }
+                    }
+
+                    // Phase 2: Parse new fields from JSON
+                    List<FieldDefinition> newFields = parseFieldsJson(fieldsJson);
+
+                    // Pre-resolve new field types
+                    List<ResolvedField> resolvedNew = new ArrayList<>();
+                    for (FieldDefinition fd : newFields) {
+                        DataType rdt = ServiceUtils.resolveDataType(dtm, fd.type);
+                        if (rdt == null) {
+                            result.append("Unknown type for new field: ").append(fd.type);
+                            return;
+                        }
+                        resolvedNew.add(new ResolvedField(fd.name, rdt, rdt.getLength(), fd.offset >= 0 ? fd.offset : -1));
+                    }
+
+                    // Phase 3: Clear entire structure
+                    while (struct.getNumComponents() > 0) {
+                        struct.delete(struct.getNumComponents() - 1);
+                    }
+
+                    // Phase 4: Re-add kept fields (before range) in order
+                    for (FieldSnapshot fs : keptFields) {
+                        if (fs.offset < startOffset) {
+                            struct.insertAtOffset(fs.offset, fs.dataType, fs.length, fs.name, null);
+                        }
+                    }
+
+                    // Phase 5: Insert new fields at their specified offsets
+                    int[] insertOffset = { startOffset };
+                    for (ResolvedField rf : resolvedNew) {
+                        if (rf.offset >= 0) {
+                            struct.insertAtOffset(rf.offset, rf.dataType, rf.length, rf.name, null);
+                        } else {
+                            struct.insertAtOffset(insertOffset[0], rf.dataType, rf.length, rf.name, null);
+                            insertOffset[0] += rf.length;
+                        }
+                    }
+
+                    // Phase 6: Re-add kept fields (after range) in order
+                    for (FieldSnapshot fs : keptFields) {
+                        if (fs.offset >= endOffset) {
+                            struct.insertAtOffset(fs.offset, fs.dataType, fs.length, fs.name, null);
+                        }
+                    }
+
+                    result.append("Replaced field range [").append(startOffset).append(", ").append(endOffset)
+                          .append(") in '").append(structName).append("' with ")
+                          .append(resolvedNew.size()).append(" new fields, kept ")
+                          .append(keptFields.size()).append(" existing fields");
+                    success.set(true);
+
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) { result.append("Failed: ").append(e.getMessage()); }
+        return Response.text(result.toString());
+    }
+
+    /** Snapshot of an existing field to preserve during rebuild */
+    private static class FieldSnapshot {
+        String name; DataType dataType; int length; int offset;
+        FieldSnapshot(String name, DataType dt, int len, int off) {
+            this.name = name; this.dataType = dt; this.length = len; this.offset = off;
+        }
+    }
+
+    /** Resolved new field ready to insert */
+    private static class ResolvedField {
+        String name; DataType dataType; int length; int offset;
+        ResolvedField(String name, DataType dt, int len, int off) {
+            this.name = name; this.dataType = dt; this.length = len; this.offset = off;
+        }
+    }
+    /**
+     * Move a data type to a different category
      */
     @McpTool(path = "/move_data_type_to_category", method = "POST", description = "Move data type to category", category = "datatype")
     public Response moveDataTypeToCategory(
