@@ -35,6 +35,37 @@ public class ProgramScriptService {
         this.threadingStrategy = threadingStrategy;
     }
 
+    private ghidra.app.script.GhidraScript loadScriptWithRebuildFallback(
+            ghidra.app.script.GhidraScriptProvider provider,
+            generic.jar.ResourceFile scriptFile,
+            PrintWriter scriptPrintWriter,
+            StringBuilder resultMsg) throws ghidra.app.script.GhidraScriptLoadException {
+        try {
+            return provider.getScriptInstance(scriptFile, scriptPrintWriter);
+        } catch (ghidra.app.script.GhidraScriptLoadException firstFailure) {
+            if (!(provider instanceof ghidra.app.script.JavaScriptProvider javaProvider)) {
+                throw firstFailure;
+            }
+
+            try {
+                ghidra.app.plugin.core.osgi.GhidraSourceBundle bundle =
+                    javaProvider.getBundleForSource(scriptFile);
+                if (bundle == null) {
+                    throw firstFailure;
+                }
+
+                resultMsg.append("Rebuilding Java script source bundle after load failure\n");
+                bundle.clean();
+                return provider.getScriptInstance(scriptFile, scriptPrintWriter);
+            } catch (ghidra.app.script.GhidraScriptLoadException retryFailure) {
+                throw retryFailure;
+            } catch (Exception rebuildFailure) {
+                firstFailure.addSuppressed(rebuildFailure);
+                throw firstFailure;
+            }
+        }
+    }
+
     /**
      * Retrieve the PluginTool from the ProgramProvider if it is a GuiProgramProvider/FrontEndProgramProvider.
      * Returns null when running headless.
@@ -779,6 +810,8 @@ public class ProgramScriptService {
 
         try {
             SwingUtilities.invokeAndWait(() -> {
+                StringWriter scriptWriter = new StringWriter();
+                PrintWriter scriptPrintWriter = new PrintWriter(scriptWriter);
                 try {
                     // Capture console output
                     PrintStream captureStream = new PrintStream(outputCapture);
@@ -856,10 +889,8 @@ public class ProgramScriptService {
                     resultMsg.append("Script provider: ").append(provider.getClass().getSimpleName()).append("\n");
 
                     // Create script instance
-                    StringWriter scriptWriter = new StringWriter();
-                    PrintWriter scriptPrintWriter = new PrintWriter(scriptWriter);
-
-                    ghidra.app.script.GhidraScript script = provider.getScriptInstance(scriptFile, scriptPrintWriter);
+                    ghidra.app.script.GhidraScript script =
+                        loadScriptWithRebuildFallback(provider, scriptFile, scriptPrintWriter, resultMsg);
                     if (script == null) {
                         resultMsg.append("ERROR: Failed to create script instance\n");
                         return;
@@ -890,7 +921,9 @@ public class ProgramScriptService {
                     resultMsg.append("\n--- SCRIPT OUTPUT ---\n");
 
                     // Execute the script
-                    script.runScript(scriptFile.getName(), args);
+                    script.execute(scriptState,
+                        new ghidra.app.script.ScriptControls(scriptPrintWriter, scriptPrintWriter,
+                            scriptMonitor));
 
                     // Get script output
                     String scriptOutput = scriptWriter.toString();
@@ -904,6 +937,10 @@ public class ProgramScriptService {
                 } catch (Exception e) {
                     resultMsg.append("\n=== SCRIPT EXECUTION ERROR ===\n");
                     resultMsg.append("Error: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+                    String scriptOutput = scriptWriter.toString();
+                    if (!scriptOutput.isEmpty()) {
+                        resultMsg.append("Script diagnostics:\n").append(scriptOutput).append("\n");
+                    }
 
                     StringWriter sw = new StringWriter();
                     PrintWriter pw = new PrintWriter(sw);

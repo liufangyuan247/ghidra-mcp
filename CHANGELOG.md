@@ -6,6 +6,14 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v4.3.1 - Unreleased
 
+### Script Execution
+
+- Fixed Java script runner retry path to clean and rebuild stale Ghidra source
+  bundles when JavaScriptProvider cannot load a newly added script class.
+- Fixed direct script execution to run the loaded script instance instead of
+  recursively resolving the same script by name, and include provider build
+  diagnostics in error output.
+
 ### Namespace Management Endpoints
 
 - Added `/create_namespace` to create namespace hierarchies (supports paths like `A::B::C`).
